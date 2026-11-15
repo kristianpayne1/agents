@@ -1,0 +1,45 @@
+# Who does what in the delegation tree. This is the only file that names models:
+# code, prompts and docs refer to tiers.
+#
+# Tiers are listed root first. The planner is depth 0, its children are depth 1, and so on.
+# A child gets the tier at its depth, except that any node at `max_depth` (or past the last
+# splitter tier) is a leaf. The last tier is the leaf tier: it never delegates.
+#
+# To use your own copy, point $AGENTS_CONFIG at it or save it as ~/.config/agents/roles.toml.
+
+[[tier]]
+name = "planner"
+can_split = true
+harness = "claude"
+model = "claude-fable-5-2"
+effort = "high"
+
+[[tier]]
+name = "heavy"
+can_split = true
+harness = "claude"
+model = "claude-opus-5-5"
+
+# Optional mid tier, off for phase 1 (it also needs max_depth = 3):
+# [[tier]]
+# name = "mid"
+# can_split = true
+# harness = "claude"
+# model = "claude-sonnet-5-5"
+
+# The leaf tier is a pool. The router picks a member for each task.
+[[tier]]
+name = "leaf"
+can_split = false
+pool = [
+  { name = "haiku", harness = "claude", model = "claude-haiku-5-5" },
+]
+
+[limits]
+max_depth = 2            # planner -> heavy -> leaf
+run_budget_usd = 10.0
+leaf_max_files = 3
+leaf_max_task_words = 300
+leaf_max_attempts = 2
+node_timeout_s = 3600    # one headless agent process
+test_timeout_s = 600     # one run of a test command

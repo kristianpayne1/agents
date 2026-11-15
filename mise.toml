@@ -1,0 +1,13 @@
+# Tools for working on this repo, pinned and locked the same way as the dotfiles:
+# mise.lock records each download's URL and checksum, and installs refuse anything else.
+# Python packages (the mcp SDK, ruff, basedpyright, pytest) are pinned in pyproject.toml
+# and locked with hashes in uv.lock.
+# To update: change a version here, then run `uv run python scripts/lock.py`.
+[settings]
+locked = true
+# asdf and vfox plugins run arbitrary scripts; stick to backends that verify downloads
+disable_backends = ["asdf", "vfox"]
+
+[tools]
+python = "3.14.10"
+uv = "0.13.6"
