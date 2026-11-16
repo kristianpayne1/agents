@@ -114,6 +114,23 @@ def changed_files(worktree: Path, base_commit: str) -> list[str]:
     return [line for line in output.splitlines() if line]
 
 
+def diff_totals(worktree: Path, base_commit: str) -> tuple[int, int, int]:
+    """Files changed, lines added and lines deleted on this branch since `base_commit`."""
+    output = git(worktree, "diff", "--numstat", base_commit, "HEAD").stdout
+    files = added = deleted = 0
+    for line in output.splitlines():
+        plus, minus, _path = line.split("\t", 2)
+        files += 1
+        # A binary file shows "-" for both counts.
+        added += int(plus) if plus.isdigit() else 0
+        deleted += int(minus) if minus.isdigit() else 0
+    return files, added, deleted
+
+
+def create_branch(repo: Path, branch: str, commit: str) -> None:
+    git(repo, "branch", branch, commit)
+
+
 def merge_no_ff(worktree: Path, branch: str, message: str) -> MergeResult:
     """Merge `branch` into the worktree's branch with a merge commit.
 

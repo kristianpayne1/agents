@@ -1,4 +1,4 @@
-"""The `agents` command: run | status | report | cleanup | install | serve."""
+"""The `agents` command: run | status | report | cleanup | bench | install | serve."""
 
 import argparse
 import os
@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from agents import config, engine, log, prompts, server, worktrees
+from agents import bench, config, engine, log, prompts, server, worktrees
 from agents.harness import base as harness_base
 from agents.harness import get_harness
 from agents.harness.claude import MCP_SERVER_NAME
@@ -32,6 +32,26 @@ def main() -> int:
     cleanup.add_argument("run_id")
     cleanup.add_argument("--branches", action="store_true", help="delete the run's branches too")
     cleanup.set_defaults(handler=cmd_cleanup)
+
+    compare = commands.add_parser(
+        "bench", help="compare the tree with single-model sessions on one task"
+    )
+    compare.add_argument(
+        "--task", required=True, type=Path, help="a file with the task, given to every arm as is"
+    )
+    compare.add_argument(
+        "--accept-cmd", required=True, help="the command that judges a result; arms never see it"
+    )
+    compare.add_argument(
+        "--accept-dir", type=Path, help="files copied over a finished result before it is judged"
+    )
+    compare.add_argument("--test-cmd", help="a test command the arms are told about and may run")
+    compare.add_argument(
+        "--arms", help="comma-separated: tree, solo:<tier>. Default: tree and every splitter tier"
+    )
+    compare.add_argument("--runs", type=int, default=3, help="runs per arm (default 3)")
+    compare.add_argument("--yes", action="store_true", help="start without asking")
+    compare.set_defaults(handler=cmd_bench)
 
     install = commands.add_parser("install", help="register the delegate server with Claude Code")
     install.add_argument("--scope", default="user", choices=["local", "user", "project"])
@@ -129,6 +149,38 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         print(f"removed {item}")
     if not args.branches:
         print(f"Kept the branches under agents/{args.run_id}/ (pass --branches to delete them).")
+    return 0
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    """Run the benchmark in this repo, after saying what it may cost."""
+    settings = config.load()
+    arms = args.arms.split(",") if args.arms else bench.default_arms(settings)
+    bench.check_arms(settings, arms)
+
+    # A solo run is capped at the run budget. A tree run can reach about twice that: the
+    # planner's own session is capped separately from what it delegates.
+    budget = settings.limits.run_budget_usd
+    per_round = sum(2 * budget if arm == bench.TREE else budget for arm in arms)
+    print(f"Arms: {', '.join(arms)}")
+    print(f"Runs: {args.runs} per arm, {args.runs * len(arms)} in all, one after another")
+    print(f"Cost: real model calls, at most about ${args.runs * per_round:.0f}; usually far less")
+    if not args.yes and input("Start? [y/N] ").strip().lower() != "y":
+        print("Not started.")
+        return 1
+
+    results = bench.run(
+        Path.cwd(),
+        settings,
+        task=args.task.read_text(),
+        accept_cmd=args.accept_cmd,
+        accept_dir=args.accept_dir,
+        test_cmd=args.test_cmd,
+        arms=arms,
+        runs=args.runs,
+    )
+    print()
+    print(bench.summary(results))
     return 0
 
 

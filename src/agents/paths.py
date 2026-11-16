@@ -6,6 +6,7 @@ Everything sits under one state directory:
     <state>/runs/<run_id>.sqlite               the run's tree and budgets
     <state>/worktrees/<repo>/<run_id>/<node>   one git worktree per node
     <state>/locks/                             lock files
+    <state>/bench/<bench_id>/                  one benchmark's results and worktrees
 """
 
 import os
@@ -38,6 +39,10 @@ def run_db(run_id: str) -> Path:
 
 def run_worktrees(repo_name: str, run_id: str) -> Path:
     return state_dir() / "worktrees" / repo_name / run_id
+
+
+def bench_dir(bench_id: str) -> Path:
+    return state_dir() / "bench" / bench_id
 
 
 def lock_file(name: str) -> Path:

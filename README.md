@@ -50,9 +50,29 @@ agents status              # the latest run's tree: status, cost and merge state
 agents status <run_id>
 agents report              # cost and pass rate per tier and per kind, from the log
 agents cleanup <run_id>    # remove the run's worktrees; add --branches to delete its branches too
+agents bench ...           # compare the tree with single-model sessions (see below)
 ```
 
 `agents install` registers the delegate server with Claude Code, so that a plain `claude` session can act as the planner without `agents run`. The server then starts the run the first time a tool is called.
+
+## Compare with a single session
+
+`agents bench` runs the same task through the tree and through plain single-model sessions, so you can see whether the tree is worth it for that kind of task.
+
+```
+agents bench --task task.md --test-cmd "uv run pytest" \
+  --accept-dir ~/bench/hidden-tests --accept-cmd "uv run pytest tests/acceptance"
+```
+
+- **Arms.** `tree` is the full tree with the planner run headless. `solo:<tier>` is one headless session using that tier's model, working alone. By default it runs the tree and one solo arm per splitter tier; choose with `--arms tree,solo:heavy`.
+- **Same start, same rules.** Every arm starts from your current `HEAD`, gets the task file word for word, and has the same permissions as a node in the tree.
+- **Judged by tests the arms never see.** After an arm finishes, the files in `--accept-dir` are copied over its result and `--accept-cmd` decides pass or fail. Write those tests before you start.
+- **Repeated.** Each arm runs `--runs` times (3 by default), one run after another, taking turns between the arms.
+- **Reviewable blind.** Each result is left as a branch, `bench/<bench_id>/<number>`, with the numbers shuffled. Look at the diffs first; which arm wrote which is in the results file it prints the path of.
+
+It prints the average cost, time and diff size per arm, and how many runs were accepted. It makes real model calls, so it says the most it could cost and asks before starting. To remove the branches afterwards: `git branch --list 'bench/*' | xargs git branch -D`.
+
+Pick tasks where the answer isn't obvious: one with many independent pieces (backfilling tests, a rename across many files), where the tree should win, and one deep change that needs the whole codebase in mind, where it probably won't.
 
 ## Configure
 
@@ -107,6 +127,7 @@ Three things to know:
 - The planner's own session isn't counted against the budget. It is interactive, so its cost isn't reported to the server. Everything it delegates is counted.
 - A splitter's own spending is only known when it finishes. Its CLI is capped at its budget, but its own cost plus its children's can end up over it. The overrun is recorded and charged to the parent.
 - If a splitter process is killed, budget its children had reserved stays reserved for the rest of the run.
+- A new worktree has only what is committed. Dependencies that live in untracked folders (`node_modules`, a virtualenv) aren't there, and nodes can't run an install command. Use a test command that works in a fresh checkout, such as `uv run pytest`, which sets up its own environment.
 - Untracked files that a test run leaves behind are committed with the node's work unless the repo ignores them. Keep build output in `.gitignore`.
 
 ## Develop

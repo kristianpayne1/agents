@@ -95,4 +95,5 @@ Where things are:
 | `src/agents/checks.py` | the task-size rules for leaves |
 | `src/agents/log.py` | the JSONL log and `agents report` |
 | `src/agents/prompts/` | the splitter and leaf system prompts |
-| `src/agents/cli.py` | `agents run`, `status`, `report`, `cleanup`, `install`, `serve` |
+| `src/agents/bench.py` | `agents bench`: the tree against single-model sessions on one task |
+| `src/agents/cli.py` | `agents run`, `status`, `report`, `cleanup`, `bench`, `install`, `serve` |

@@ -148,6 +148,49 @@ def latest_run_id() -> str | None:
     return run_ids[-1] if run_ids else None
 
 
+async def run_root_headless(
+    root: Caller, settings: Config, *, task: str, test_cmd: str | None
+) -> harness_base.HarnessResult:
+    """Run the root planner with nobody at the keyboard, and return its result.
+
+    `agents run` opens the planner as an interactive session instead. This is for the
+    benchmark and the live test, where the planner's cost has to be measured too.
+    """
+    planner = settings.tiers[0].splitter_agent()
+    budget = settings.limits.run_budget_usd
+    request = harness_base.NodeRequest(
+        role=harness_base.SPLITTER,
+        model=planner.model,
+        effort=planner.effort,
+        system_prompt=prompts.load(harness_base.SPLITTER),
+        prompt=node_prompt(
+            is_leaf=False,
+            task=task,
+            contract="",
+            files=[],
+            test_cmd=test_cmd,
+            budget_usd=budget,
+            children_are_leaves=children_are_leaves(settings, root.depth),
+            failed_test_output="",
+        ),
+        worktree=root.worktree,
+        budget_usd=budget,
+        env=context_env(
+            settings,
+            run_id=root.run_id,
+            node_id=root.node_id,
+            depth=root.depth,
+            budget_usd=budget,
+            worktree=root.worktree,
+        ),
+        delegate_server=SERVER_COMMAND,
+        allowed_commands=[test_cmd] if test_cmd else [],
+    )
+    return await harness_base.run(
+        get_harness(planner.harness), request, settings.limits.node_timeout_s
+    )
+
+
 # --- delegate ----------------------------------------------------------------------------
 
 

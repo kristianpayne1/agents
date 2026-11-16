@@ -14,9 +14,7 @@ from pathlib import Path
 import pytest
 from helpers import checkout_state, git
 
-from agents import cli, config, engine, log, paths, prompts, tree
-from agents.harness import base as harness_base
-from agents.harness import get_harness
+from agents import cli, config, engine, log, paths, tree
 
 TEST_CMD = "python3 -m unittest"
 
@@ -46,40 +44,8 @@ def test_real_models_take_a_feature_down_the_tree_and_back(tmp_path: Path) -> No
 
     settings = config.load()
     root = engine.start_run(repo, settings)
-    planner = settings.tiers[0].splitter_agent()
-    budget = settings.limits.run_budget_usd
-    request = harness_base.NodeRequest(
-        role=harness_base.SPLITTER,
-        model=planner.model,
-        effort=planner.effort,
-        system_prompt=prompts.load(harness_base.SPLITTER),
-        prompt=engine.node_prompt(
-            is_leaf=False,
-            task=TASK,
-            contract="",
-            files=[],
-            test_cmd=TEST_CMD,
-            budget_usd=budget,
-            children_are_leaves=engine.children_are_leaves(settings, root.depth),
-            failed_test_output="",
-        ),
-        worktree=root.worktree,
-        budget_usd=budget,
-        env=engine.context_env(
-            settings,
-            run_id=root.run_id,
-            node_id=root.node_id,
-            depth=root.depth,
-            budget_usd=budget,
-            worktree=root.worktree,
-        ),
-        delegate_server=engine.SERVER_COMMAND,
-        allowed_commands=[TEST_CMD],
-    )
 
-    result = asyncio.run(
-        harness_base.run(get_harness(planner.harness), request, settings.limits.node_timeout_s)
-    )
+    result = asyncio.run(engine.run_root_headless(root, settings, task=TASK, test_cmd=TEST_CMD))
 
     print()
     print(cli.format_status(engine.status(root.run_id)))
