@@ -1,5 +1,6 @@
 """`delegate`: branching, refusals, budgets, retries, the depth cap and parallel siblings."""
 
+import asyncio
 import os
 import time
 from collections.abc import Callable
@@ -370,3 +371,46 @@ def test_splitter_prompt_says_what_its_children_are(settings: Config) -> None:
     assert "delegate to are splitters" in prompt_for(depth=0)
     assert "delegate to are leaves" in prompt_for(depth=1)
     assert "needs `files` and a `test_cmd`" in prompt_for(depth=1)
+
+
+def test_splitter_prompt_gives_the_leaf_limits(settings: Config) -> None:
+    prompt = engine.node_prompt(
+        is_leaf=False,
+        task="Build the orders module",
+        contract="",
+        files=[],
+        test_cmd=None,
+        budget_usd=2.0,
+        children_are_leaves=True,
+        failed_test_output="",
+        limits=settings.limits,
+    )
+
+    limits = settings.limits
+    assert f"at most {limits.leaf_max_files} files" in prompt
+    assert f"at most {limits.leaf_max_task_words} words" in prompt
+
+
+def test_delegate_many_runs_children_together_and_answers_in_order(
+    repo: Path, leaf_settings: Config
+) -> None:
+    root = engine.start_run(repo, leaf_settings)
+    calls = [
+        leaf_call("a.txt", task=fake(write={"a.txt": "a\n"}, sleep=0.3)),
+        leaf_call("b.txt", task=fake(write={"b.txt": "b\n"}, sleep=0.3)),
+        leaf_call("c.txt", files=[]),
+    ]
+
+    results = asyncio.run(engine.delegate_many(root, leaf_settings, calls))
+
+    assert [r["status"] for r in results] == ["passed", "passed", "refused"]
+    assert "a.txt" in results[0]["diff_stat"] and "b.txt" in results[1]["diff_stat"]
+    db = paths.run_db(root.run_id)
+    first, second = (
+        tree.get_node(db, results[0]["node_id"]),
+        tree.get_node(db, results[1]["node_id"]),
+    )
+    assert first is not None and second is not None
+    assert first.finished_at is not None and second.finished_at is not None
+    assert first.started_at < second.finished_at
+    assert second.started_at < first.finished_at

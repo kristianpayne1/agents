@@ -1,6 +1,6 @@
 # agents
 
-A delegation tree for coding agents. A planner at the root plans the work and reviews the result, heavy splitters break a feature into small testable tasks, and leaves each do one small task. Everything goes through one MCP server, the delegate server, which gives every splitter three tools: `delegate`, `integrate` and `status`.
+A delegation tree for coding agents. A planner at the root plans the work and reviews the result, heavy splitters break a feature into small testable tasks, and leaves each do one small task. Everything goes through one MCP server, the delegate server, which gives every splitter four tools: `delegate`, `delegate_many`, `integrate` and `status`.
 
 This file has two parts: how to use the tree, and how to work on this repo.
 
@@ -24,7 +24,7 @@ That creates a worktree and a branch for the planner (`agents/<run_id>/root`), s
 | `contract` | Interfaces, signatures and test names the child must keep to. Passed down unchanged. |
 | `files` | Files the child may edit. Required for leaves. |
 | `test_cmd` | The command that proves the task is done. Required for leaves. |
-| `kind` | A tag for the logs: `tests`, `rename`, `boilerplate`, `component`, `migration`, `feature` or `other` |
+| `kind` | A tag for the logs: `tests`, `rename`, `boilerplate`, `component`, `migration`, `feature`, `review` or `other` |
 | `budget_usd` | The slice of your remaining budget this child's subtree may use |
 
 The server picks the child's tier from its depth: the planner's children are heavy splitters, and theirs are leaves. You never name a model. The child's branch starts from the tip of your branch at that moment, so commit before you delegate.
@@ -35,6 +35,8 @@ The result has `node_id`, `status`, `branch`, `summary`, `diff_stat`, `test_outp
 - `failed`: it still failed after the leaf's retries.
 - `refused`: a leaf task broke a size rule, and nothing ran. Leaf tasks need `files` (at most `leaf_max_files`), a `test_cmd`, and a task plus contract within `leaf_max_task_words`.
 - `over_budget`: you asked for more than you have left.
+
+**`delegate_many`** takes a list of children, each with the same arguments as `delegate`, starts them all at once and returns their results in order when the last is done. Use it for independent pieces: separate `delegate` calls only overlap if the agent CLI sends tool calls together, which it may not.
 
 **`integrate`** merges the children you name into your branch, one at a time with a merge commit, then runs a test command in your worktree. It's a separate tool on purpose: review a child's result before you merge it. If a merge conflicts, it stops, leaves that child unmerged and your worktree as it was, and returns the conflicting files to you. Delegate that task again (the new child starts from your updated branch) or make the change yourself. With an empty list of nodes it only runs the test command.
 
@@ -48,9 +50,12 @@ The result has `node_id`, `status`, `branch`, `summary`, `diff_stat`, `test_outp
 - A leaf's test command has to be able to pass with only the files that leaf may edit, plus what is already committed on your branch. If it needs a file that another leaf is writing, the leaf tends to write that file too, outside its list. Order such tasks instead: merge the first, then delegate the second.
 - A task that writes tests for code that isn't written yet can't be judged by running those tests: they fail until the code exists. Give it a test command that only checks the tests load (`pytest --collect-only tests/test_orders.py`), or delegate the implementation first.
 - Keep a test command plain: one program and its arguments, like `pytest tests/test_orders.py`. A leaf may only run its test command exactly as written, and a command with quotes, pipes or several steps is often denied to it.
-- Give siblings different files wherever you can, and run independent children in parallel by calling `delegate` several times in one turn.
+- Give siblings different files wherever you can, and run independent children in parallel with `delegate_many`.
+- Once the contract is fixed, give leaves implementation as well as tests: they are the cheapest tier.
+- Write leaf tasks within the limits, which each splitter's prompt states; a refusal costs a turn.
 - Tag every task's `kind`.
 - A splitter that does a piece of work itself gives a one-line reason in its summary.
+- The planner settles the task's open design questions before delegating, and writes the decisions into the contract. When everything is merged, it delegates one `review` child to check the branch against the task's numbered requirements, fixes what it finds, and lists the choices the work made in its summary.
 
 Good leaf tasks:
 
@@ -86,7 +91,7 @@ Where things are:
 | --- | --- |
 | `roles.toml` | tiers, the leaf pool and the limits |
 | `src/agents/config.py` | loads and validates `roles.toml` |
-| `src/agents/server.py` | the MCP server: describes the three tools |
+| `src/agents/server.py` | the MCP server: describes the four tools |
 | `src/agents/engine.py` | what the tools do: run a child, retry, merge, report |
 | `src/agents/tree.py` | run state in SQLite: nodes and budgets |
 | `src/agents/worktrees.py` | every git command: worktrees, branches, merges |

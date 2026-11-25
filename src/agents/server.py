@@ -1,4 +1,4 @@
-"""The delegate MCP server: `delegate`, `integrate` and `status` over stdio.
+"""The delegate MCP server: `delegate`, `delegate_many`, `integrate` and `status` over stdio.
 
 Every splitter, the root planner included, gets its own copy of this server. A copy learns
 which node it speaks for from the run context in its environment. If there is none, it is
@@ -13,11 +13,32 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import MCPServer
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from agents import config, engine, prompts
 from agents.config import Config
 from agents.harness import base as harness_base
+
+
+class Child(BaseModel):
+    """One child for `delegate_many`: the same arguments as `delegate`."""
+
+    task: str = Field(description="What the child should do, in plain words.")
+    budget_usd: float = Field(
+        description="The slice of your remaining budget this child's subtree may use."
+    )
+    contract: str = Field(
+        default="",
+        description="Interfaces, signatures and test names the child must keep to.",
+    )
+    files: list[str] | None = Field(
+        default=None,
+        description="Files the child may edit, relative to the repo. Needed for leaves.",
+    )
+    test_cmd: str | None = Field(
+        default=None, description="The command that proves the task is done. Needed for leaves."
+    )
+    kind: str = Field(default="other", description=f"One of: {', '.join(engine.KINDS)}.")
 
 
 class Session:
@@ -69,6 +90,9 @@ def build_server() -> MCPServer:
     ) -> str:
         """Start a child node in its own worktree and wait for its result.
 
+        To run several children that don't depend on each other at the same time, use
+        `delegate_many` instead.
+
         The child's branch starts from the tip of your branch, so commit first. The server
         picks the child's tier from its depth. Returns node_id, status (passed, failed,
         refused or over_budget), branch, summary, diff_stat, test_output, cost_usd and
@@ -86,6 +110,25 @@ def build_server() -> MCPServer:
             kind=kind,
         )
         return _as_text(result)
+
+    @server.tool()
+    async def delegate_many(
+        children: Annotated[
+            list[Child],
+            Field(description="Children that don't depend on each other, each as for `delegate`."),
+        ],
+    ) -> str:
+        """Start several children at once, each in its own worktree, and wait for all of them.
+
+        Use it for independent pieces: they run at the same time, so the wait is the slowest
+        child's, not the sum. Commit first: every child starts from the tip of your branch.
+        Returns a list of results in the order given, each as `delegate` returns it.
+        """
+        caller = await session.caller()
+        results = await engine.delegate_many(
+            caller, settings, [child.model_dump() for child in children]
+        )
+        return json.dumps(results, indent=2)
 
     @server.tool()
     async def integrate(

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from agents import checks, config, log, paths, prompts, router, tree, worktrees
-from agents.config import Config, PoolMember
+from agents.config import Config, Limits, PoolMember
 from agents.harness import base as harness_base
 from agents.harness import get_harness
 
@@ -28,7 +28,7 @@ ENV_BUDGET = "AGENTS_BUDGET_USD"
 ENV_WORKTREE = "AGENTS_WORKTREE"
 ENV_ATTEMPT = "AGENTS_ATTEMPT"
 
-KINDS = ("tests", "rename", "boilerplate", "component", "migration", "feature", "other")
+KINDS = ("tests", "rename", "boilerplate", "component", "migration", "feature", "review", "other")
 
 # How a splitter's agent CLI starts its own copy of the delegate server.
 SERVER_COMMAND = [sys.executable, "-m", "agents.server"]
@@ -172,6 +172,7 @@ async def run_root_headless(
             budget_usd=budget,
             children_are_leaves=children_are_leaves(settings, root.depth),
             failed_test_output="",
+            limits=settings.limits,
         ),
         worktree=root.worktree,
         budget_usd=budget,
@@ -312,6 +313,17 @@ async def delegate(
     }
 
 
+async def delegate_many(
+    caller: Caller, settings: Config, children: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Start several children at once, wait for all of them, and return their results in order.
+
+    Parallel `delegate` calls only overlap if the agent CLI sends MCP tool calls together,
+    which it may not; this runs them together on the server whatever the client does.
+    """
+    return list(await asyncio.gather(*(delegate(caller, settings, **child) for child in children)))
+
+
 def _refusal(
     caller: Caller,
     settings: Config,
@@ -405,6 +417,7 @@ async def _run_node(
                 budget_usd=budget_left,
                 children_are_leaves=children_are_leaves(settings, node.depth),
                 failed_test_output=outcome.test_output if attempt > 1 else "",
+                limits=settings.limits,
             ),
             worktree=worktree,
             budget_usd=budget_left,
@@ -468,6 +481,7 @@ def node_prompt(
     budget_usd: float,
     children_are_leaves: bool,
     failed_test_output: str,
+    limits: Limits | None = None,
 ) -> str:
     sections = [f"## Task\n\n{task.strip()}"]
     if contract.strip():
@@ -492,7 +506,7 @@ def node_prompt(
             "## Budget\n\n"
             f"You have ${budget_usd:.2f} for this task, including everything you delegate."
         )
-        sections.append("## Your children\n\n" + _children_note(children_are_leaves))
+        sections.append("## Your children\n\n" + _children_note(children_are_leaves, limits))
         sections.append(
             "## This session\n\n"
             "Nobody is watching this session and nobody can answer questions, so make "
@@ -516,12 +530,20 @@ def children_are_leaves(settings: Config, depth: int) -> bool:
     return not settings.tier_for_depth(depth + 1).can_split
 
 
-def _children_note(leaves: bool) -> str:
+def _children_note(leaves: bool, limits: Limits | None) -> str:
     if leaves:
-        return (
+        note = (
             "The nodes you delegate to are leaves. Every task you hand out needs `files` "
             "and a `test_cmd`, and has to fit the leaf size limits, or it is refused."
         )
+        if limits is not None:
+            # Splitters that don't know the numbers write tasks over them and lose a turn to
+            # each refusal (8 of 17 leaf tasks in one run).
+            note += (
+                f" The limits: at most {limits.leaf_max_files} files, and at most "
+                f"{limits.leaf_max_task_words} words of task and contract together."
+            )
+        return note
     return (
         "The nodes you delegate to are splitters, which split the work further. "
         "`files` and `test_cmd` are optional for them."

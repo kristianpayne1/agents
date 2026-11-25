@@ -93,7 +93,11 @@ The config is read from `$AGENTS_CONFIG`, then `~/.config/agents/roles.toml`, th
 
 **Tiers, not models.** A child's tier comes from its depth in the tree, and the tier's model comes from `roles.toml`. Splitters never name a model, and neither does any code or prompt here.
 
-**Task-size checks.** A leaf task must list its files (no more than `leaf_max_files`), give a test command, and fit in `leaf_max_task_words`. If it doesn't, `delegate` returns `refused` and nothing runs. The splitter has to split further.
+**Task-size checks.** A leaf task must list its files (no more than `leaf_max_files`), give a test command, and fit in `leaf_max_task_words`. If it doesn't, `delegate` returns `refused` and nothing runs. The splitter has to split further. Each splitter's prompt states the limits, so it can write within them.
+
+**Running children together.** `delegate_many` starts a list of children at once on the server and returns when the last is done. Separate `delegate` calls only overlap if the agent CLI sends tool calls together.
+
+**The planner settles the design and has the result reviewed.** Before delegating, it decides the task's open questions and puts them in the contract. When everything is merged, it delegates one `review` child to check the branch against the task's numbered requirements, then fixes what that finds.
 
 **Tests decide.** After a leaf exits, the server runs its test command. If it fails, the leaf is run again with the test output, up to `leaf_max_attempts`. Then the task is `failed`. If a node leaves work uncommitted, the server commits it.
 
