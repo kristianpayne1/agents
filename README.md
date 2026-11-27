@@ -46,7 +46,7 @@ This starts a run:
 While it runs, or afterwards:
 
 ```
-agents status              # the latest run's tree: status, cost and merge state per node
+agents status              # the latest run's tree: status, cost, merge state and decisions per node
 agents status <run_id>
 agents report              # cost and pass rate per tier and per kind, from the log
 agents cleanup <run_id>    # remove the run's worktrees; add --branches to delete its branches too
@@ -85,6 +85,7 @@ Pick tasks where the answer isn't obvious: one with many independent pieces (bac
 | `leaf_max_files` | the most files a leaf task may list |
 | `leaf_max_task_words` | the most words in a leaf's task plus contract |
 | `leaf_max_attempts` | how many times a leaf is tried before its task fails |
+| `max_questions` | how many times a splitter's children may ask it to decide something before it has to pass what's open up to its own parent (the planner is exempt) |
 | `node_timeout_s`, `test_timeout_s` | time limits for one agent process and one test run |
 
 The config is read from `$AGENTS_CONFIG`, then `~/.config/agents/roles.toml`, then the `roles.toml` in this repo. State goes under `$AGENTS_STATE_DIR`, or `~/.local/state/agents` by default.
@@ -97,7 +98,16 @@ The config is read from `$AGENTS_CONFIG`, then `~/.config/agents/roles.toml`, th
 
 **Running children together.** `delegate_many` starts a list of children at once on the server and returns when the last is done. Separate `delegate` calls only overlap if the agent CLI sends tool calls together.
 
-**The planner settles the design and has the result reviewed.** Before delegating, it decides the task's open questions and puts them in the contract. When everything is merged, it delegates one `review` child to check the branch against the task's numbered requirements, then fixes what that finds.
+**Decisions go up the tree.** When a node meets a choice its task and contract don't settle, it sorts it by risk:
+
+- *Low-risk*: undoing it means reverting that node's work and nothing else, and no other task is written against it. A splitter makes the choice, carries on, and lists it under `## Decisions made`. `delegate` returns the list as `decisions` for the parent to review before it merges, and `integrate` writes it into the merge commit, so a revert of that commit undoes it.
+- *Not low-risk*: it changes a contract, a data format or anything stored, adds a dependency, changes behaviour that existing code or users rely on, touches security, or settles contradicting instructions. The node stops and ends its message with a `## Decision needed` section. `delegate` returns `needs_decision` with the question, and the leaf isn't retried. The parent decides it if it's within the parent's own task, and otherwise asks its own parent in the same way. At the top, the planner asks you.
+
+Nothing goes round in circles. A splitter only answers a question it is sure of, never answers the same question twice, and never lets two children settle a choice between themselves: anything it is unsure of goes up. Once a splitter's children have asked `max_questions` times, the server refuses its further `delegate` calls, so it has to merge what it can and pass what is open up. The planner is exempt, because its questions go to you.
+
+Leaves, the cheapest tier, make no decisions at all: they ask about every open choice, low-risk ones included. A leaf that lists decisions it made anyway comes back `needs_decision`, and its parent merges the work only if it agrees.
+
+**The planner settles the design with you and has the result reviewed.** Before delegating, it puts the task's open questions that aren't low-risk to you, with the option it would pick for each, lists the low-risk ones it decided so you can overrule them, and writes the answers into the contract. It doesn't take its delegates' decisions on trust: it checks each one against the task, the contract, the diff and your answers, then keeps it, overrules it, or brings it to you when it is unsure. Its final summary lists every decision made in the tree and what happened to each. When everything is merged, it delegates one `review` child to check the branch against the task's numbered requirements, then fixes what that finds.
 
 **Tests decide.** After a leaf exits, the server runs its test command. If it fails, the leaf is run again with the test output, up to `leaf_max_attempts`. Then the task is `failed`. If a node leaves work uncommitted, the server commits it.
 
@@ -107,7 +117,7 @@ The config is read from `$AGENTS_CONFIG`, then `~/.config/agents/roles.toml`, th
 
 **Run state** is one small SQLite file per run, shared by every delegate server in the run.
 
-**The log.** Each finished node writes one line to `~/.local/state/agents/log.jsonl`: run, node, parent, depth, tier, model, kind, file count, task word count, attempts, status, cost, tokens, permission denials, duration and test exit code. `integrate` calls are logged too. This log is the main output of phase 1.
+**The log.** Each finished node writes one line to `~/.local/state/agents/log.jsonl`: run, node, parent, depth, tier, model, kind, file count, task word count, attempts, status, cost, tokens, permission denials, duration, test exit code and how many decisions it made itself. `integrate` calls are logged too. This log is the main output of phase 1.
 
 ## What headless nodes may do
 

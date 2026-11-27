@@ -62,7 +62,7 @@ def _table(group_by: str, nodes: list[dict[str, Any]]) -> list[str]:
         groups[node[group_by]].append(node)
 
     header = (
-        f"{group_by:<12} {'nodes':>5} {'passed':>6} {'failed':>6} {'refused':>7} "
+        f"{group_by:<12} {'nodes':>5} {'passed':>6} {'failed':>6} {'asked':>5} {'refused':>7} "
         f"{'pass rate':>9} {'cost':>8} {'per node':>8} {'attempts':>8} {'seconds':>8}"
     )
     lines = [header, "-" * len(header)]
@@ -70,13 +70,16 @@ def _table(group_by: str, nodes: list[dict[str, Any]]) -> list[str]:
         group = groups[name]
         passed = _count(group, "passed")
         failed = _count(group, "failed")
+        # Nodes that stopped to ask their parent for a decision.
+        asked = _count(group, "needs_decision")
         refused = _count(group, "refused") + _count(group, "over_budget")
-        # Pass rate is out of the nodes that actually ran.
-        ran = [node for node in group if node["status"] in ("passed", "failed")]
-        pass_rate = f"{100 * passed / len(ran):.0f}%" if ran else "-"
+        # Pass rate is out of the nodes that ran to the end, without stopping to ask.
+        finished = passed + failed
+        pass_rate = f"{100 * passed / finished:.0f}%" if finished else "-"
+        ran = [node for node in group if node["status"] in ("passed", "failed", "needs_decision")]
         cost = sum(node["cost_usd"] for node in group)
         lines.append(
-            f"{name:<12} {len(group):>5} {passed:>6} {failed:>6} {refused:>7} "
+            f"{name:<12} {len(group):>5} {passed:>6} {failed:>6} {asked:>5} {refused:>7} "
             f"{pass_rate:>9} {cost:>8.2f} {_average(ran, 'cost_usd'):>8.2f} "
             f"{_average(ran, 'attempts'):>8.1f} {_average(ran, 'duration_s'):>8.0f}"
         )

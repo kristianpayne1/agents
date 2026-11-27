@@ -34,6 +34,7 @@ run_budget_usd = {run_budget_usd}
 leaf_max_files = {leaf_max_files}
 leaf_max_task_words = {leaf_max_task_words}
 leaf_max_attempts = {leaf_max_attempts}
+max_questions = {max_questions}
 node_timeout_s = 60
 test_timeout_s = 60
 """
@@ -44,6 +45,7 @@ DEFAULT_LIMITS = {
     "leaf_max_files": 3,
     "leaf_max_task_words": 300,
     "leaf_max_attempts": 2,
+    "max_questions": 3,
 }
 
 

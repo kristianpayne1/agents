@@ -29,18 +29,21 @@ That creates a worktree and a branch for the planner (`agents/<run_id>/root`), s
 
 The server picks the child's tier from its depth: the planner's children are heavy splitters, and theirs are leaves. You never name a model. The child's branch starts from the tip of your branch at that moment, so commit before you delegate.
 
-The result has `node_id`, `status`, `branch`, `summary`, `diff_stat`, `test_output`, `cost_usd` and `attempts`. The status is one of:
+The result has `node_id`, `status`, `branch`, `summary`, `question`, `decisions`, `diff_stat`, `test_output`, `cost_usd` and `attempts`. The status is one of:
 
 - `passed`: the test command passed.
 - `failed`: it still failed after the leaf's retries.
+- `needs_decision`: the child stopped to ask you something, and `question` says what. A child asks by ending its final message with a `## Decision needed` section. It isn't retried. Decide, write the answer into the contract and delegate again, or ask your own parent. Its work can still be merged.
+
+`decisions` lists the low-risk decisions a splitter child made itself, from a `## Decisions made` section in its final message. Review them before you merge: if you disagree, don't merge, and delegate again with your choice in the contract. Leaves may not make decisions: a leaf that lists any comes back `needs_decision`, and its parent merges its work only if it agrees with them.
 - `refused`: a leaf task broke a size rule, and nothing ran. Leaf tasks need `files` (at most `leaf_max_files`), a `test_cmd`, and a task plus contract within `leaf_max_task_words`.
 - `over_budget`: you asked for more than you have left.
 
 **`delegate_many`** takes a list of children, each with the same arguments as `delegate`, starts them all at once and returns their results in order when the last is done. Use it for independent pieces: separate `delegate` calls only overlap if the agent CLI sends tool calls together, which it may not.
 
-**`integrate`** merges the children you name into your branch, one at a time with a merge commit, then runs a test command in your worktree. It's a separate tool on purpose: review a child's result before you merge it. If a merge conflicts, it stops, leaves that child unmerged and your worktree as it was, and returns the conflicting files to you. Delegate that task again (the new child starts from your updated branch) or make the change yourself. With an empty list of nodes it only runs the test command.
+**`integrate`** merges the children you name into your branch, one at a time with a merge commit, then runs a test command in your worktree. Each merge commit's message lists the decisions that child made, so reverting the commit undoes them. It's a separate tool on purpose: review a child's result before you merge it. If a merge conflicts, it stops, leaves that child unmerged and your worktree as it was, and returns the conflicting files to you. Delegate that task again (the new child starts from your updated branch) or make the change yourself. With an empty list of nodes it only runs the test command.
 
-**`status`** shows the run's tree so far: each node's status, cost and merge state, your branch and worktree, and the budget you have left.
+**`status`** shows the run's tree so far: each node's status, cost and merge state, the decisions it recorded and any question it asked, your branch and worktree, and the budget you have left.
 
 ### Splitting rules
 
@@ -55,7 +58,8 @@ The result has `node_id`, `status`, `branch`, `summary`, `diff_stat`, `test_outp
 - Write leaf tasks within the limits, which each splitter's prompt states; a refusal costs a turn.
 - Tag every task's `kind`.
 - A splitter that does a piece of work itself gives a one-line reason in its summary.
-- The planner settles the task's open design questions before delegating, and writes the decisions into the contract. When everything is merged, it delegates one `review` child to check the branch against the task's numbered requirements, fixes what it finds, and lists the choices the work made in its summary.
+- Decisions go up the tree, as a record or as a question. A low-risk decision (undoing it means reverting one child's work and nothing else, and no other task is written against it) is made by the splitter that meets it and listed under `## Decisions made`, so the run doesn't stall. Leaves never decide: they ask about every open choice, low-risk ones included, so a splitter settles edge cases, error messages, defaults and names in the contract before delegating. A decision that isn't low-risk (it changes a contract, a data format or anything stored, adds a dependency, changes behaviour that existing code or users rely on, touches security, or settles contradicting instructions) is a question for the parent under `## Decision needed`. The parent decides it if it's within the parent's own task, and otherwise asks its own parent. Each splitter passes up the decisions made below it that it kept. Nothing goes round in circles: a splitter only answers a question it is sure of, never answers the same question twice, and never lets children settle a choice between themselves. Anything it is unsure of goes up. After `max_questions` questions from its children, the server refuses its further `delegate` calls, so it has to pass what is open up. The planner is exempt, because its questions go to the user.
+- The planner puts the task's open design questions that aren't low-risk to the user before delegating, with the option it would pick for each, and writes the answers into the contract. It lists the low-risk ones it decided in the same message, so the user can overrule them. Questions that come up from below and that nothing settles go to the user too. The planner scrutinises every decision its delegates made, against the task, the contract, the diff and the user's answers, and `status` lists them all for it. It keeps a decision, overrules it, or, when it is unsure, brings it to the user. Its final summary lists every decision made in the tree and what happened to each. When the planner runs with nobody watching (`agents bench`), it decides them itself and lists them in its summary. When everything is merged, it delegates one `review` child to check the branch against the task's numbered requirements, fixes what it finds, and lists the choices the work made in its summary.
 
 Good leaf tasks:
 

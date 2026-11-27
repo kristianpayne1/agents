@@ -52,6 +52,11 @@ class Limits:
     leaf_max_files: int
     leaf_max_task_words: int
     leaf_max_attempts: int
+    # How many times a splitter's children may come back `needs_decision` before it may not
+    # delegate any more and has to pass what is open up to its own parent. This stops a
+    # question going round between a splitter and its children. The root is exempt: its
+    # questions go to the user.
+    max_questions: int = 3
     node_timeout_s: int = 3600
     test_timeout_s: int = 600
 
@@ -142,6 +147,8 @@ def _validate(config: Config) -> None:
         raise ConfigError(f"{where}: max_depth must be at least 1")
     if limits.leaf_max_attempts < 1:
         raise ConfigError(f"{where}: leaf_max_attempts must be at least 1")
+    if limits.max_questions < 1:
+        raise ConfigError(f"{where}: max_questions must be at least 1")
     if limits.run_budget_usd <= 0:
         raise ConfigError(f"{where}: run_budget_usd must be more than 0")
 

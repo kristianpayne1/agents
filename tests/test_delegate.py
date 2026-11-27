@@ -326,6 +326,7 @@ def test_log_line_has_every_field(repo: Path, leaf_settings: Config) -> None:
     assert entry["cost_usd"] == 0.01
     assert entry["duration_s"] >= 0
     assert entry["test_exit_code"] == 0
+    assert entry["decisions_made"] == 0
 
 
 def test_test_command_that_hangs_is_stopped_with_everything_it_started(
@@ -414,3 +415,171 @@ def test_delegate_many_runs_children_together_and_answers_in_order(
     assert first.finished_at is not None and second.finished_at is not None
     assert first.started_at < second.finished_at
     assert second.started_at < first.finished_at
+
+
+QUESTION = """Wrote the parser.
+
+## Decision needed
+
+Should an empty order be an error or an empty list?
+Options: A) raise ValueError B) return []
+I'd pick: A, because the contract says orders are never empty.
+"""
+
+
+def test_leaf_that_asks_for_a_decision_is_not_retried(repo: Path, leaf_settings: Config) -> None:
+    root = engine.start_run(repo, leaf_settings)
+
+    # The test fails, which would normally mean a retry. A question stops that.
+    task = fake(write={"out.txt": "half\n"}, result=QUESTION)
+    result = delegate(
+        root, leaf_settings, **leaf_call("out.txt", task=task, test_cmd="grep done out.txt")
+    )
+
+    assert result["status"] == "needs_decision"
+    assert result["attempts"] == 1
+    assert result["question"].startswith("Should an empty order be an error")
+    assert result["question"].endswith("orders are never empty.")
+    assert result["summary"] == QUESTION
+    assert log.read()[-1]["status"] == "needs_decision"
+    node = tree.get_node(paths.run_db(root.run_id), result["node_id"])
+    assert node is not None
+    assert node.status == tree.NEEDS_DECISION
+
+
+def test_splitter_can_pass_a_question_up(repo: Path, settings: Config) -> None:
+    root = engine.start_run(repo, settings)
+
+    result = delegate(root, settings, task=fake(result=QUESTION), kind="feature", budget_usd=1.0)
+
+    assert result["status"] == "needs_decision"
+    assert "empty order" in result["question"]
+
+
+def test_node_that_does_not_ask_has_no_question(repo: Path, leaf_settings: Config) -> None:
+    root = engine.start_run(repo, leaf_settings)
+
+    result = delegate(root, leaf_settings, **leaf_call("out.txt"))
+
+    assert result["status"] == "passed"
+    assert result["question"] == ""
+
+
+def test_decision_request_reads_the_section_up_to_the_next_heading() -> None:
+    summary = "Did half.\n\n## decision NEEDED\n\nWhich way?\n\n## Notes\n\nSomething else."
+
+    assert engine.decision_request(summary) == "Which way?"
+    assert engine.decision_request("All done, nothing to ask.") is None
+    assert "gave no question" in (engine.decision_request("## Decision needed\n") or "")
+
+
+def test_child_splitter_prompt_says_to_ask_its_parent(settings: Config) -> None:
+    arguments = {
+        "is_leaf": False,
+        "task": "Build the orders module",
+        "contract": "",
+        "files": [],
+        "test_cmd": None,
+        "budget_usd": 5.0,
+        "children_are_leaves": True,
+        "failed_test_output": "",
+    }
+
+    child = engine.node_prompt(**arguments)
+    root = engine.node_prompt(**arguments, has_parent=False)
+
+    assert "ask your parent" in child
+    assert engine.DECISION_HEADING in child
+    assert engine.DECISIONS_MADE_HEADING in child
+    assert "come back `needs_decision` 3 times" not in child  # no limits given
+    with_limits = engine.node_prompt(**arguments, limits=settings.limits)
+    assert "come back `needs_decision` 3 times" in with_limits
+    assert "ask your parent" not in root
+    assert "Decide open questions yourself" in root
+
+
+DECIDED = """Wrote the parser.
+
+## Decisions made
+
+- An empty order raises ValueError, not an empty list. (orders.py)
+- Quantities are rounded down, not up. (orders.py)
+"""
+
+
+def test_splitter_low_risk_decisions_come_back_with_a_passed_result(
+    repo: Path, settings: Config
+) -> None:
+    root = engine.start_run(repo, settings)
+
+    result = delegate(root, settings, task=fake(result=DECIDED), kind="feature", budget_usd=1.0)
+
+    assert result["status"] == "passed"
+    assert result["question"] == ""
+    assert result["decisions"].startswith("- An empty order raises ValueError")
+    assert result["decisions"].endswith("rounded down, not up. (orders.py)")
+    assert log.read()[-1]["decisions_made"] == 2
+
+
+def test_leaf_that_decides_for_itself_needs_its_parent_to_agree(
+    repo: Path, leaf_settings: Config
+) -> None:
+    root = engine.start_run(repo, leaf_settings)
+
+    # The test passes, but a leaf may not make decisions, so the work doesn't count yet.
+    task = fake(write={"out.txt": "x\n"}, result=DECIDED)
+    result = delegate(root, leaf_settings, **leaf_call("out.txt", task=task))
+
+    assert result["status"] == "needs_decision"
+    assert result["attempts"] == 1
+    assert result["question"] == engine.LEAF_DECIDED_QUESTION
+    assert "rounded down" in result["decisions"]
+    assert log.read()[-1]["decisions_made"] == 2
+
+
+def test_node_can_record_decisions_and_ask_in_one_message(
+    repo: Path, leaf_settings: Config
+) -> None:
+    root = engine.start_run(repo, leaf_settings)
+
+    message = DECIDED + "\n## Decision needed\n\nShould orders be stored as JSON or CSV?\n"
+    task = fake(write={"out.txt": "x\n"}, result=message)
+    result = delegate(root, leaf_settings, **leaf_call("out.txt", task=task))
+
+    assert result["status"] == "needs_decision"
+    assert result["question"] == "Should orders be stored as JSON or CSV?"
+    assert "rounded down" in result["decisions"]
+    assert "JSON" not in result["decisions"]
+
+
+def _asking_leaf(path: str) -> dict[str, object]:
+    return leaf_call(path, task=fake(write={path: "x\n"}, result="## Decision needed\n\nWhich?"))
+
+
+def test_splitter_whose_children_keep_asking_must_ask_its_parent(
+    repo: Path, settings: Config
+) -> None:
+    root = engine.start_run(repo, settings)
+    heavy = delegate(root, settings, task=fake(), kind="feature", budget_usd=5.0)
+    node = tree.get_node(paths.run_db(root.run_id), heavy["node_id"])
+    assert node is not None
+    # Speak for the heavy splitter, as its own delegate server would.
+    splitter = engine.Caller(root.run_id, node.node_id, node.depth, Path(node.worktree))
+
+    asked = [delegate(splitter, settings, **_asking_leaf(f"q{n}.txt")) for n in range(3)]
+    fourth = delegate(splitter, settings, **leaf_call("done.txt"))
+
+    assert [result["status"] for result in asked] == ["needs_decision"] * 3
+    assert fourth["status"] == "refused"
+    assert "come back needs_decision 3 times" in fourth["summary"]
+    assert "ask your parent" in fourth["summary"]
+
+
+def test_the_planner_is_never_stopped_from_delegating_by_questions(
+    repo: Path, leaf_settings: Config
+) -> None:
+    root = engine.start_run(repo, leaf_settings)
+
+    results = [delegate(root, leaf_settings, **_asking_leaf(f"q{n}.txt")) for n in range(4)]
+
+    assert [result["status"] for result in results] == ["needs_decision"] * 4

@@ -22,10 +22,12 @@ from pathlib import Path
 
 ROOT_ID = "root"
 
-# A node's status. A node that never started is `refused` or `over_budget`.
+# A node's status. A node that never started is `refused` or `over_budget`. A node that
+# stopped to ask its parent something is `needs_decision`.
 RUNNING = "running"
 PASSED = "passed"
 FAILED = "failed"
+NEEDS_DECISION = "needs_decision"
 REFUSED = "refused"
 OVER_BUDGET = "over_budget"
 
@@ -296,6 +298,14 @@ def finish_node(
         )
         row = connection.execute("SELECT * FROM node WHERE node_id = ?", (node_id,)).fetchone()
     return Node(**dict(row))
+
+
+def count_children(db_path: Path, parent_id: str, status: str) -> int:
+    """How many of a node's children have this status."""
+    with _transaction(db_path) as connection:
+        return connection.execute(
+            "SELECT COUNT(*) FROM node WHERE parent_id = ? AND status = ?", (parent_id, status)
+        ).fetchone()[0]
 
 
 def set_merge_state(db_path: Path, node_id: str, merge_state: str) -> None:

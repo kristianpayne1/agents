@@ -12,6 +12,8 @@ Instructions (all optional):
     cost        the cost to report, in dollars (default 0.01)
     sleep       seconds to wait first, to make parallel runs overlap
     exit        the exit code (default 0)
+    result      the final message to print (default "fake agent done"), for example one
+                that asks for a decision
     delegate    a list of `delegate` arguments: act as a splitter and run these children,
                 all at the same time
     integrate   a test command: merge the children that passed, then run it
@@ -57,7 +59,7 @@ def main() -> int:
         children, integrated = asyncio.run(_act_as_splitter(instructions))
 
     result = {
-        "result": "fake agent done",
+        "result": instructions.get("result", "fake agent done"),
         "total_cost_usd": instructions.get("cost", 0.01),
         "children": children,
         "integrated": integrated,

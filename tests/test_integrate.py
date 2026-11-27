@@ -150,3 +150,44 @@ def test_failed_child_can_still_be_merged_if_the_parent_decides_to(
     )
 
     assert result["status"] == "passed"
+
+
+def test_child_that_asked_for_a_decision_can_still_be_merged(
+    repo: Path, leaf_settings: Config
+) -> None:
+    root = engine.start_run(repo, leaf_settings)
+    task = fake(write={"out.txt": "x\n"}, result="## Decision needed\n\nWhich way?")
+    asked = delegate(root, leaf_settings, **leaf_call("out.txt", task=task))
+    assert asked["status"] == "needs_decision"
+
+    result = engine.integrate(
+        root, leaf_settings, node_ids=[asked["node_id"]], test_cmd="test -f out.txt"
+    )
+
+    assert result["status"] == "passed"
+    assert result["merged"] == [asked["node_id"]]
+
+
+def test_merge_commit_records_the_childs_decisions(repo: Path, leaf_settings: Config) -> None:
+    root = engine.start_run(repo, leaf_settings)
+    task = fake(
+        write={"out.txt": "x\n"},
+        result="Done.\n\n## Decisions made\n\n- Used tabs, not spaces. (out.txt)\n",
+    )
+    child = delegate(root, leaf_settings, **leaf_call("out.txt", task=task))
+
+    engine.integrate(root, leaf_settings, node_ids=[child["node_id"]], test_cmd="true")
+
+    message = git(root.worktree, "log", "-1", "--format=%B")
+    assert message.startswith(f"Merge {child['node_id']} (feature)")
+    assert f"Decisions made by {child['node_id']}:" in message
+    assert "- Used tabs, not spaces. (out.txt)" in message
+
+
+def test_merge_commit_without_decisions_is_one_line(repo: Path, leaf_settings: Config) -> None:
+    root = engine.start_run(repo, leaf_settings)
+    child = delegate(root, leaf_settings, **leaf_call("out.txt"))
+
+    engine.integrate(root, leaf_settings, node_ids=[child["node_id"]], test_cmd="true")
+
+    assert git(root.worktree, "log", "-1", "--format=%B") == f"Merge {child['node_id']} (feature)"

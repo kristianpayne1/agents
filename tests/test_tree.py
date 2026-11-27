@@ -125,3 +125,31 @@ def test_two_runs_in_the_same_minute_get_different_ids(repo: Path, settings: Con
 
     assert first.run_id != second.run_id
     assert engine.latest_run_id() == second.run_id
+
+
+def test_status_lists_every_decision_and_question_in_the_tree(repo: Path, settings: Config) -> None:
+    root = engine.start_run(repo, settings)
+    # A heavy splitter records a decision of its own. Its leaf decides something too, which
+    # leaves may not do, so the leaf comes back as a question.
+    leaf = leaf_call(
+        "a.txt",
+        task=fake(
+            write={"a.txt": "x\n"}, result="Done.\n\n## Decisions made\n\n- Used UTF-8. (a.txt)\n"
+        ),
+    )
+    heavy = fake(
+        delegate=[leaf],
+        result="Split it.\n\n## Decisions made\n\n- One file per order. (root.1)\n",
+    )
+    delegate(root, settings, task=heavy, kind="feature", budget_usd=5.0)
+
+    nodes = {node["node_id"]: node for node in engine.status(root.run_id)["nodes"]}
+    assert nodes["root.1"]["decisions"] == "- One file per order. (root.1)"
+    assert nodes["root.1"]["question"] == ""
+    assert nodes["root.1.1"]["decisions"] == "- Used UTF-8. (a.txt)"
+    assert nodes["root.1.1"]["question"] == engine.LEAF_DECIDED_QUESTION
+
+    text = cli.format_status(engine.status(root.run_id))
+    assert "  decided - One file per order. (root.1)" in text
+    assert "    decided - Used UTF-8. (a.txt)" in text
+    assert "    asks: This leaf made the decisions" in text

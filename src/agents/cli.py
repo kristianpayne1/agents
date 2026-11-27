@@ -127,10 +127,20 @@ def format_status(status: dict[str, Any]) -> str:
         name = "  " * depth + node["node_id"]
         merge = node["merge"] if node["merge"] != "not merged" else ""
         lines.append(
-            f"{name:<16} {node['tier']:<8} {node['status']:<11} {merge:<8} "
+            f"{name:<16} {node['tier']:<8} {node['status']:<14} {merge:<8} "
             f"${node['cost_usd']:>6.2f}  {node['kind']:<11} {node['task']}"
         )
+        indent = "  " * (depth + 1)
+        if node["question"]:
+            lines.append(f"{indent}asks: {_first_line(node['question'])}")
+        for decision in node["decisions"].splitlines():
+            if decision.strip():
+                lines.append(f"{indent}decided {decision.strip()}")
     return "\n".join(lines)
+
+
+def _first_line(text: str) -> str:
+    return text.strip().splitlines()[0] if text.strip() else ""
 
 
 def _sort_key(node_id: str) -> list[int]:

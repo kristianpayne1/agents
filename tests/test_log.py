@@ -44,10 +44,10 @@ def test_report_has_cost_and_pass_rate_per_tier_and_kind() -> None:
 
     assert "5 nodes over 1 runs, $1.08 in total" in report
     assert "2 integrate calls, 1 with a merge conflict" in report
-    # name, nodes, passed, failed, refused, pass rate, cost, per node, attempts, seconds
-    assert row(report, "heavy") == "heavy 1 1 0 0 100% 1.00 1.00 1.0 10"
-    assert row(report, "leaf") == "leaf 4 2 1 1 67% 0.08 0.03 1.3 10"
-    assert row(report, "tests").startswith("tests 2 1 1 0 50%")
+    # name, nodes, passed, failed, asked, refused, pass rate, cost, per node, attempts, seconds
+    assert row(report, "heavy") == "heavy 1 1 0 0 0 100% 1.00 1.00 1.0 10"
+    assert row(report, "leaf") == "leaf 4 2 1 0 1 67% 0.08 0.03 1.3 10"
+    assert row(report, "tests").startswith("tests 2 1 1 0 0 50%")
 
 
 def test_nodes_without_a_cost_are_called_out() -> None:
@@ -61,3 +61,15 @@ def test_write_then_read_round_trips() -> None:
     log.write(node("leaf", "rename", "failed"))
 
     assert [event["kind"] for event in log.read()] == ["tests", "rename"]
+
+
+def test_nodes_that_asked_are_counted_but_not_in_the_pass_rate() -> None:
+    events = [
+        node("leaf", "tests", "passed"),
+        node("leaf", "tests", "needs_decision"),
+    ]
+
+    report = log.report(events)
+
+    # name, nodes, passed, failed, asked, refused, pass rate, ...
+    assert row(report, "leaf").startswith("leaf 2 1 0 1 0 100%")

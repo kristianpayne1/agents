@@ -33,6 +33,20 @@ KINDS = ("tests", "rename", "boilerplate", "component", "migration", "feature", 
 # How a splitter's agent CLI starts its own copy of the delegate server.
 SERVER_COMMAND = [sys.executable, "-m", "agents.server"]
 
+# A node that needs its parent to decide something ends its final message with a section
+# under this heading. Everything after the heading is the question.
+DECISION_HEADING = "## Decision needed"
+# A node lists the low-risk decisions it made itself under this heading, so its parent can
+# review them and undo any it disagrees with. They also go into the merge commit's message.
+DECISIONS_MADE_HEADING = "## Decisions made"
+
+# The question a leaf's parent gets when the leaf made decisions itself instead of asking.
+LEAF_DECIDED_QUESTION = (
+    "This leaf made the decisions listed in `decisions` itself, which leaves may not do. "
+    "If you agree with them, merge its work. If not, delegate the task again with your "
+    "choices in the contract."
+)
+
 # Long output (test runs, conflict diffs) is cut to its last part before it goes to a model.
 OUTPUT_LIMIT = 4000
 TEST_TIMEOUT_EXIT_CODE = 124
@@ -54,6 +68,8 @@ class Outcome:
 
     status: str
     summary: str
+    question: str = ""
+    decisions: str = ""
     cost_usd: float = 0.0
     cost_known: bool = True
     attempts: int = 0
@@ -173,6 +189,7 @@ async def run_root_headless(
             children_are_leaves=children_are_leaves(settings, root.depth),
             failed_test_output="",
             limits=settings.limits,
+            has_parent=False,
         ),
         worktree=root.worktree,
         budget_usd=budget,
@@ -299,6 +316,7 @@ async def delegate(
             "permission_denials": outcome.permission_denials,
             "duration_s": round(time.time() - started, 1),
             "test_exit_code": outcome.test_exit_code,
+            "decisions_made": _count_items(outcome.decisions),
         }
     )
     return {
@@ -306,6 +324,8 @@ async def delegate(
         "status": outcome.status,
         "branch": node.branch,
         "summary": outcome.summary,
+        "question": outcome.question,
+        "decisions": outcome.decisions,
         "diff_stat": diff_stat,
         "test_output": outcome.test_output,
         "cost_usd": outcome.cost_usd,
@@ -345,6 +365,17 @@ def _refusal(
         return f"Refused: unknown kind '{kind}'. Use one of: {', '.join(KINDS)}."
     if budget_usd <= 0:
         return "Refused: `budget_usd` must be more than 0."
+    if caller.depth > 0:
+        # Below the root, a splitter whose children keep asking is going round in circles.
+        db = paths.run_db(caller.run_id)
+        asked = tree.count_children(db, caller.node_id, tree.NEEDS_DECISION)
+        if asked >= settings.limits.max_questions:
+            return (
+                f"Refused: your children have come back needs_decision {asked} times, the "
+                f"limit is {settings.limits.max_questions}. Don't delegate again. Merge what "
+                "is right whatever the answers, then finish and ask your parent about "
+                f"everything still open, under a `{DECISION_HEADING}` heading."
+            )
     if is_leaf:
         return checks.check_leaf_task(
             task=task, contract=contract, files=files, test_cmd=test_cmd, limits=settings.limits
@@ -436,6 +467,7 @@ async def _run_node(
         result = await harness_base.run(harness, request, limits.node_timeout_s)
 
         outcome.summary = result.summary
+        outcome.decisions = decisions_made(result.summary)
         if result.cost_usd is None:
             outcome.cost_known = False
         else:
@@ -456,6 +488,18 @@ async def _run_node(
             passed = exit_code == 0
         else:
             passed = result.ok
+        # A node that asked a question is waiting for an answer, so it isn't retried.
+        question = decision_request(result.summary)
+        if is_leaf and question is None and outcome.decisions:
+            # Leaves may not decide anything themselves. If one did, its parent has to
+            # agree before the work counts. The question goes in the summary, which is
+            # stored, so `status` shows it too.
+            question = LEAF_DECIDED_QUESTION
+            outcome.summary += f"\n\n{DECISION_HEADING}\n\n{question}\n"
+        if question is not None:
+            outcome.status = tree.NEEDS_DECISION
+            outcome.question = question
+            break
         if passed:
             outcome.status = tree.PASSED
             break
@@ -471,6 +515,42 @@ async def _run_node(
     return outcome
 
 
+def decision_request(summary: str) -> str | None:
+    """The question in a node's final message, or None if it didn't ask one."""
+    question = _section(summary, DECISION_HEADING)
+    if question is None:
+        return None
+    return question or "(The node asked for a decision but gave no question.)"
+
+
+def decisions_made(summary: str) -> str:
+    """The decisions a node made itself and listed in its final message, or ""."""
+    return _section(summary, DECISIONS_MADE_HEADING) or ""
+
+
+def _section(summary: str, heading: str) -> str | None:
+    """The text under a heading, up to the next heading. None if the heading isn't there."""
+    lines = summary.splitlines()
+    starts = [
+        number
+        for number, line in enumerate(lines)
+        if line.strip().lower().startswith(heading.lower())
+    ]
+    if not starts:
+        return None
+    body: list[str] = []
+    for line in lines[starts[0] + 1 :]:
+        if line.startswith("## "):
+            break
+        body.append(line)
+    return "\n".join(body).strip()
+
+
+def _count_items(text: str) -> int:
+    """How many list items a section has: lines starting with `- ` or `* `."""
+    return sum(1 for line in text.splitlines() if line.strip().startswith(("- ", "* ")))
+
+
 def node_prompt(
     *,
     is_leaf: bool,
@@ -482,6 +562,7 @@ def node_prompt(
     children_are_leaves: bool,
     failed_test_output: str,
     limits: Limits | None = None,
+    has_parent: bool = True,
 ) -> str:
     sections = [f"## Task\n\n{task.strip()}"]
     if contract.strip():
@@ -506,14 +587,32 @@ def node_prompt(
             "## Budget\n\n"
             f"You have ${budget_usd:.2f} for this task, including everything you delegate."
         )
-        sections.append("## Your children\n\n" + _children_note(children_are_leaves, limits))
+        children = _children_note(children_are_leaves, limits)
+        if has_parent and limits is not None:
+            children += (
+                f" If your children come back `needs_decision` {limits.max_questions} times "
+                "in all, you can't delegate any more: merge what is right, then ask your "
+                "parent about everything still open."
+            )
+        sections.append("## Your children\n\n" + children)
+        if has_parent:
+            questions = (
+                "Nobody is watching this session. Make low-risk decisions yourself and list "
+                f"them under a `{DECISIONS_MADE_HEADING}` heading. If you meet a decision that "
+                "isn't low-risk and that your task and contract don't settle, stop and ask your "
+                f"parent under a `{DECISION_HEADING}` heading, as your instructions describe."
+            )
+        else:
+            questions = (
+                "Nobody is watching this session and nobody can answer questions. Decide "
+                "open questions yourself, and list each decision in your final summary."
+            )
         sections.append(
             "## This session\n\n"
-            "Nobody is watching this session and nobody can answer questions, so make "
-            "reasonable choices and finish. You can run `git status`, `diff`, `log`, `show`, "
-            "`add` and `commit`, plus your test command if you were given one. Other shell "
-            "commands are denied. To run any other test command, call `integrate`: with an "
-            "empty list of nodes it only runs the command."
+            f"{questions} You can run `git status`, `diff`, `log`, `show`, `add` and "
+            "`commit`, plus your test command if you were given one. Other shell commands "
+            "are denied. To run any other test command, call `integrate`: with an empty list "
+            "of nodes it only runs the command."
         )
     if failed_test_output:
         sections.append(
@@ -600,7 +699,7 @@ def integrate(
         node = tree.get_node(db, node_id)
         if node is None or node.parent_id != caller.node_id:
             return _integrate_error(f"'{node_id}' is not one of your children.")
-        if node.status not in (tree.PASSED, tree.FAILED):
+        if node.status not in (tree.PASSED, tree.FAILED, tree.NEEDS_DECISION):
             return _integrate_error(f"'{node_id}' is {node.status}, so it has nothing to merge.")
         children.append(node)
 
@@ -611,6 +710,11 @@ def integrate(
 
         for position, node in enumerate(children):
             message = f"Merge {node.node_id} ({node.kind})"
+            # The child's own decisions go in the merge commit, so reverting that one commit
+            # undoes them.
+            decisions = decisions_made(node.summary)
+            if decisions:
+                message += f"\n\nDecisions made by {node.node_id}:\n\n{decisions}"
             result = worktrees.merge_no_ff(caller.worktree, node.branch, message)
             if not result.merged:
                 # Stop here and hand the conflict back. Resolving it is the caller's call.
@@ -706,6 +810,9 @@ def status(run_id: str, node_id: str = tree.ROOT_ID) -> dict[str, Any]:
                 "attempts": node.attempts,
                 "branch": node.branch,
                 "task": _first_line(node.task),
+                # Every decision recorded in the tree, so the planner can check them all.
+                "decisions": decisions_made(node.summary),
+                "question": decision_request(node.summary) or "",
             }
             for node in nodes
         ],

@@ -95,8 +95,11 @@ def build_server() -> MCPServer:
 
         The child's branch starts from the tip of your branch, so commit first. The server
         picks the child's tier from its depth. Returns node_id, status (passed, failed,
-        refused or over_budget), branch, summary, diff_stat, test_output, cost_usd and
-        attempts. The child's work stays on its branch until you call `integrate`.
+        needs_decision, refused or over_budget), branch, summary, question, decisions,
+        diff_stat, test_output, cost_usd and attempts. `question` is set when the status is
+        needs_decision: the child stopped to ask you something. `decisions` lists the
+        low-risk decisions the child made itself; review them before you merge. The child's
+        work stays on its branch until you call `integrate`.
         """
         caller = await session.caller()
         result = await engine.delegate(
@@ -154,8 +157,9 @@ def build_server() -> MCPServer:
 
     @server.tool()
     async def status() -> str:
-        """Show the run's tree so far: each node's status and cost, your branch and
-        worktree, and the budget you have left."""
+        """Show the run's tree so far: each node's status and cost, the decisions it
+        recorded and any question it asked, your branch and worktree, and the budget you
+        have left."""
         caller = await session.caller()
         result = engine.status(caller.run_id, caller.node_id)
         # A splitter has to know this before it writes tasks: leaves need files and tests.
