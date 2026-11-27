@@ -1,4 +1,4 @@
-"""The delegate MCP server: `delegate`, `delegate_many`, `integrate` and `status` over stdio.
+"""The delegate MCP server: `delegate`, `delegate_many`, `answer`, `integrate` and `status`.
 
 Every splitter, the root planner included, gets its own copy of this server. A copy learns
 which node it speaks for from the run context in its environment. If there is none, it is
@@ -97,9 +97,9 @@ def build_server() -> MCPServer:
         picks the child's tier from its depth. Returns node_id, status (passed, failed,
         needs_decision, refused or over_budget), branch, summary, question, decisions,
         diff_stat, test_output, cost_usd and attempts. `question` is set when the status is
-        needs_decision: the child stopped to ask you something. `decisions` lists the
-        low-risk decisions the child made itself; review them before you merge. The child's
-        work stays on its branch until you call `integrate`.
+        needs_decision: the child stopped to ask you something; reply with `answer`.
+        `decisions` lists the decisions the child made itself; review them before you merge.
+        The child's work stays on its branch until you call `integrate`.
         """
         caller = await session.caller()
         result = await engine.delegate(
@@ -132,6 +132,37 @@ def build_server() -> MCPServer:
             caller, settings, [child.model_dump() for child in children]
         )
         return json.dumps(results, indent=2)
+
+    @server.tool()
+    async def answer(
+        node_id: Annotated[
+            str, Field(description="The child that came back needs_decision, e.g. root.1.2.")
+        ],
+        answer: Annotated[
+            str,
+            Field(
+                description="Your answer to its question: what to do and, in a line, why. "
+                "It is kept with the node and shown to any later attempt."
+            ),
+        ],
+        budget_usd: Annotated[
+            float,
+            Field(description="A further slice of your remaining budget for the child."),
+        ],
+    ) -> str:
+        """Answer a child that came back needs_decision, and wait for its new result.
+
+        The child carries on in its own agent session and worktree, with what it already
+        knew and did, so this is cheaper than delegating the task again. Delegate again
+        instead if the answer changes the task itself. Returns a result like `delegate`'s.
+        It may come back needs_decision again. The answer is kept with the node and shown by
+        `status`.
+        """
+        caller = await session.caller()
+        result = await engine.answer(
+            caller, settings, node_id=node_id, answer=answer, budget_usd=budget_usd
+        )
+        return _as_text(result)
 
     @server.tool()
     async def integrate(

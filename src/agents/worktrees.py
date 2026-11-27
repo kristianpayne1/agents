@@ -5,6 +5,7 @@ worktrees under the state directory, on branches named `agents/<run_id>/<node_id
 """
 
 import fcntl
+import re
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -150,3 +151,23 @@ def merge_no_ff(worktree: Path, branch: str, message: str) -> MergeResult:
         details = (result.stderr or result.stdout).strip()
     git(worktree, "merge", "--abort", check=False)
     return MergeResult(merged=False, conflict_files=conflict_files, details=details)
+
+
+def find_merge_commit(repo: Path, branch: str, node_id: str) -> str | None:
+    """The short hash of the commit on `branch` that merged `node_id`, or None.
+
+    `integrate` names its merge commits "Merge <node_id> (<kind>)", so this finds the one
+    commit to revert to undo that node's work, and the decisions it made.
+    """
+    result = git(
+        repo,
+        "log",
+        "--merges",
+        "--format=%h",
+        "--max-count=1",
+        f"--grep=^Merge {re.escape(node_id)} (",
+        branch,
+        "--",
+        check=False,
+    )
+    return result.stdout.strip() or None

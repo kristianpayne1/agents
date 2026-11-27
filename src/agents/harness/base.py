@@ -35,6 +35,9 @@ class NodeRequest:
     delegate_server: list[str] | None
     # Shell commands the node may run besides a few git ones. In practice, its test command.
     allowed_commands: list[str]
+    # Carry on this earlier session instead of starting a new one. The prompt is then only
+    # what is new, such as a parent's answer to the node's question.
+    resume_session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,8 @@ class HarnessResult:
     tokens: dict[str, int] = field(default_factory=dict)
     # How many tool calls the CLI refused because the node had no permission for them.
     permission_denials: int = 0
+    # The CLI's session, so that the node can be resumed later. "" if it didn't say.
+    session_id: str = ""
 
 
 class Harness(ABC):
@@ -59,7 +64,10 @@ class Harness(ABC):
 
     @abstractmethod
     def build_command(self, request: NodeRequest) -> Command:
-        """The headless command that runs this node. The prompt goes in on stdin."""
+        """The headless command that runs this node. The prompt goes in on stdin.
+
+        If `request.resume_session_id` is set, the command carries on that session.
+        """
 
     @abstractmethod
     def parse_result(self, exit_code: int, stdout: str, stderr: str) -> HarnessResult:

@@ -48,12 +48,27 @@ While it runs, or afterwards:
 ```
 agents status              # the latest run's tree: status, cost, merge state and decisions per node
 agents status <run_id>
+agents decisions           # every decision, question and answer in the latest run, and how to undo each
 agents report              # cost and pass rate per tier and per kind, from the log
 agents cleanup <run_id>    # remove the run's worktrees; add --branches to delete its branches too
 agents bench ...           # compare the tree with single-model sessions (see below)
+agents example <folder>    # make a small repo to try the tree on (see examples/orders/)
 ```
 
 `agents install` registers the delegate server with Claude Code, so that a plain `claude` session can act as the planner without `agents run`. The server then starts the run the first time a tool is called.
+
+## Try it on the example
+
+`examples/orders/` is a small repo with a task that leaves a few choices open on purpose, so a run has decisions to make and questions to ask:
+
+```
+agents example ~/tmp/orders
+cd ~/tmp/orders
+agents run "Do the task in TASK.md"
+agents decisions
+```
+
+It also has hidden acceptance tests for `agents bench`, and `tests/test_example.py` plays a whole run on it with the fake harness. See `examples/orders/README.md`.
 
 ## Compare with a single session
 
@@ -85,7 +100,7 @@ Pick tasks where the answer isn't obvious: one with many independent pieces (bac
 | `leaf_max_files` | the most files a leaf task may list |
 | `leaf_max_task_words` | the most words in a leaf's task plus contract |
 | `leaf_max_attempts` | how many times a leaf is tried before its task fails |
-| `max_questions` | how many times a splitter's children may ask it to decide something before it has to pass what's open up to its own parent (the planner is exempt) |
+| `max_question_rounds` | how many of a splitter's `delegate`, `delegate_many` and `answer` calls may bring back questions before it has to pass what's open up to its own parent (the planner is exempt) |
 | `node_timeout_s`, `test_timeout_s` | time limits for one agent process and one test run |
 
 The config is read from `$AGENTS_CONFIG`, then `~/.config/agents/roles.toml`, then the `roles.toml` in this repo. State goes under `$AGENTS_STATE_DIR`, or `~/.local/state/agents` by default.
@@ -101,13 +116,13 @@ The config is read from `$AGENTS_CONFIG`, then `~/.config/agents/roles.toml`, th
 **Decisions go up the tree.** When a node meets a choice its task and contract don't settle, it sorts it by risk:
 
 - *Low-risk*: undoing it means reverting that node's work and nothing else, and no other task is written against it. A splitter makes the choice, carries on, and lists it under `## Decisions made`. `delegate` returns the list as `decisions` for the parent to review before it merges, and `integrate` writes it into the merge commit, so a revert of that commit undoes it.
-- *Not low-risk*: it changes a contract, a data format or anything stored, adds a dependency, changes behaviour that existing code or users rely on, touches security, or settles contradicting instructions. The node stops and ends its message with a `## Decision needed` section. `delegate` returns `needs_decision` with the question, and the leaf isn't retried. The parent decides it if it's within the parent's own task, and otherwise asks its own parent in the same way. At the top, the planner asks you.
+- *Not low-risk*: it changes a contract, a data format or anything stored, adds a dependency, changes behaviour that existing code or users rely on, touches security, or settles contradicting instructions. The node stops and ends its message with a `## Decision needed` section. `delegate` returns `needs_decision` with the question, and the leaf isn't retried. The parent decides it if it's within the parent's own task and replies with `answer`: the child carries on in its own session and worktree, so nothing is redone. Otherwise the parent asks its own parent in the same way. At the top, the planner asks you.
 
-Nothing goes round in circles. A splitter only answers a question it is sure of, never answers the same question twice, and never lets two children settle a choice between themselves: anything it is unsure of goes up. Once a splitter's children have asked `max_questions` times, the server refuses its further `delegate` calls, so it has to merge what it can and pass what is open up. The planner is exempt, because its questions go to you.
+Nothing goes round in circles. A splitter only answers a question it is sure of, never answers the same question twice, and never lets two children settle a choice between themselves: anything it is unsure of goes up. Once `max_question_rounds` of a splitter's calls have brought back questions (children asking in the same call count once), the server refuses its further `delegate` and `answer` calls, so it has to merge what it can and pass what is open up. The planner is exempt, because its questions go to you.
 
 Leaves, the cheapest tier, make no decisions at all: they ask about every open choice, low-risk ones included. A leaf that lists decisions it made anyway comes back `needs_decision`, and its parent merges the work only if it agrees.
 
-**The planner settles the design with you and has the result reviewed.** Before delegating, it puts the task's open questions that aren't low-risk to you, with the option it would pick for each, lists the low-risk ones it decided so you can overrule them, and writes the answers into the contract. It doesn't take its delegates' decisions on trust: it checks each one against the task, the contract, the diff and your answers, then keeps it, overrules it, or brings it to you when it is unsure. Its final summary lists every decision made in the tree and what happened to each. When everything is merged, it delegates one `review` child to check the branch against the task's numbered requirements, then fixes what that finds.
+**The planner settles the design with you and has the result reviewed.** Before delegating, it puts the task's open questions that aren't low-risk to you, with the option it would pick for each, lists the low-risk ones it decided so you can overrule them, and writes the answers into the contract. It doesn't take its delegates' decisions on trust: it checks each one against the task, the contract, the diff and your answers, then keeps it, overrules it, or brings it to you when it is unsure. Its final summary lists every decision made in the tree and what happened to each. When everything is merged, it delegates one `review` child to check the branch against the task's numbered requirements and to find choices in the diff that no node recorded, then fixes what that finds. Its summary marks the unrecorded decisions, so you know which nodes decided things without saying so.
 
 **Tests decide.** After a leaf exits, the server runs its test command. If it fails, the leaf is run again with the test output, up to `leaf_max_attempts`. Then the task is `failed`. If a node leaves work uncommitted, the server commits it.
 

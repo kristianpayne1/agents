@@ -13,6 +13,7 @@ How budgets work:
   is the refund.
 """
 
+import json
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -66,7 +67,13 @@ CREATE TABLE node (
     merge_state    TEXT NOT NULL DEFAULT '',
     test_exit_code INTEGER,
     started_at     REAL NOT NULL,
-    finished_at    REAL
+    finished_at    REAL,
+    contract        TEXT NOT NULL DEFAULT '',
+    files           TEXT NOT NULL DEFAULT '[]',
+    test_cmd        TEXT NOT NULL DEFAULT '',
+    session_id      TEXT NOT NULL DEFAULT '',
+    answers         TEXT NOT NULL DEFAULT '',
+    question_rounds INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -104,6 +111,22 @@ class Node:
     test_exit_code: int | None
     started_at: float
     finished_at: float | None
+    # What the node was asked to do, kept so that it can be resumed with an answer.
+    contract: str = ""
+    files: str = "[]"  # a JSON list
+    test_cmd: str = ""
+    # The agent CLI's session, so that a node that asked a question can be resumed.
+    session_id: str = ""
+    # The questions it asked and the answers its parent gave, oldest first, as
+    # "Q: ...\nA: ..." pairs separated by blank lines.
+    answers: str = ""
+    # How many of this node's delegate, delegate_many and answer calls brought back at least
+    # one question. See Limits.max_question_rounds.
+    question_rounds: int = 0
+
+    @property
+    def file_list(self) -> list[str]:
+        return json.loads(self.files)
 
 
 @contextmanager
@@ -208,6 +231,9 @@ def add_child(
     task: str,
     budget_usd: float,
     refusal: str | None,
+    contract: str = "",
+    files: list[str] | None = None,
+    test_cmd: str = "",
 ) -> Node:
     """Record a new child and reserve its budget from the parent, in one step.
 
@@ -234,8 +260,9 @@ def add_child(
         started = status == RUNNING
         connection.execute(
             """INSERT INTO node (node_id, parent_id, depth, tier, harness, model, kind, task,
-                                 status, budget_usd, held_usd, summary, started_at, finished_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                 status, budget_usd, held_usd, summary, started_at, finished_at,
+                                 contract, files, test_cmd)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 node_id,
                 parent_id,
@@ -251,6 +278,9 @@ def add_child(
                 summary,
                 now,
                 None if started else now,
+                contract,
+                json.dumps(files or []),
+                test_cmd,
             ),
         )
         row = connection.execute("SELECT * FROM node WHERE node_id = ?", (node_id,)).fetchone()
@@ -276,6 +306,7 @@ def finish_node(
     attempts: int,
     summary: str,
     test_exit_code: int | None,
+    session_id: str = "",
 ) -> Node:
     """Record a node's result and refund what its subtree didn't spend."""
     with _transaction(db_path) as connection:
@@ -283,7 +314,7 @@ def finish_node(
         connection.execute(
             """UPDATE node
                SET status = ?, cost_usd = ?, held_usd = ?, attempts = ?, summary = ?,
-                   test_exit_code = ?, finished_at = ?
+                   test_exit_code = ?, finished_at = ?, session_id = ?
                WHERE node_id = ?""",
             (
                 status,
@@ -293,6 +324,7 @@ def finish_node(
                 summary,
                 test_exit_code,
                 time.time(),
+                session_id,
                 node_id,
             ),
         )
@@ -300,12 +332,46 @@ def finish_node(
     return Node(**dict(row))
 
 
-def count_children(db_path: Path, parent_id: str, status: str) -> int:
-    """How many of a node's children have this status."""
+def add_question_round(db_path: Path, node_id: str) -> None:
+    """Count one more call of this node's that brought back a question."""
     with _transaction(db_path) as connection:
-        return connection.execute(
-            "SELECT COUNT(*) FROM node WHERE parent_id = ? AND status = ?", (parent_id, status)
-        ).fetchone()[0]
+        connection.execute(
+            "UPDATE node SET question_rounds = question_rounds + 1 WHERE node_id = ?",
+            (node_id,),
+        )
+
+
+def reopen_node(db_path: Path, node_id: str, *, budget_usd: float, answer: str) -> str | None:
+    """Start a node that asked a question again, with `budget_usd` more to spend.
+
+    The extra budget is reserved from the parent in the same step, as `add_child` does.
+    Returns why the node can't be reopened, or None once it has been.
+    """
+    with _transaction(db_path) as connection:
+        row = connection.execute("SELECT * FROM node WHERE node_id = ?", (node_id,)).fetchone()
+        if row is None:
+            return f"no node '{node_id}' in this run"
+        node = Node(**dict(row))
+        if node.status != NEEDS_DECISION:
+            return f"'{node_id}' is {node.status}, not needs_decision: there is nothing to answer"
+        if not node.session_id:
+            return f"'{node_id}' has no session to resume. Delegate its task again instead."
+        assert node.parent_id is not None
+        left = _remaining(connection, node.parent_id)
+        if budget_usd > left + 1e-9:
+            return f"asked for ${budget_usd:.2f} but only ${left:.2f} is left"
+
+        # The node's budget becomes what it has used so far plus the new slice, and while it
+        # runs it holds all of that against its parent, as a new child would.
+        new_budget = node.cost_usd + _children_held(connection, node_id) + budget_usd
+        answers = node.answers + ("\n\n" if node.answers else "") + answer.strip()
+        connection.execute(
+            """UPDATE node
+               SET status = ?, budget_usd = ?, held_usd = ?, answers = ?, finished_at = NULL
+               WHERE node_id = ?""",
+            (RUNNING, new_budget, new_budget, answers, node_id),
+        )
+    return None
 
 
 def set_merge_state(db_path: Path, node_id: str, merge_state: str) -> None:

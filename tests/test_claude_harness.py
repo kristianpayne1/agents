@@ -1,6 +1,7 @@
 """The `claude` adapter: the command it builds and how it reads the CLI's JSON result."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from agents.harness import get_harness
@@ -124,3 +125,23 @@ def test_output_that_is_not_json_is_a_failure() -> None:
     assert not result.ok
     assert "command not found" in result.summary
     assert result.cost_usd is None
+
+
+def test_resumed_node_carries_on_its_session() -> None:
+    fresh = get_harness("claude").build_command(request(LEAF)).argv
+    resumed_request = replace(request(LEAF), resume_session_id="abc-123")
+    resumed = get_harness("claude").build_command(resumed_request).argv
+
+    assert "--resume" not in fresh
+    assert flag_value(resumed, "--resume") == "abc-123"
+    # Everything else is the same, so the node keeps its permissions and budget.
+    assert [arg for arg in resumed if arg not in ("--resume", "abc-123")] == fresh
+
+
+def test_session_id_is_read_from_the_result() -> None:
+    payload = {"result": "done", "total_cost_usd": 0.1, "session_id": "abc-123"}
+
+    result = get_harness("claude").parse_result(0, json.dumps(payload), "")
+
+    assert result.session_id == "abc-123"
+    assert get_harness("claude").parse_result(0, json.dumps({"result": "x"}), "").session_id == ""

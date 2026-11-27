@@ -1,6 +1,6 @@
 # agents
 
-A delegation tree for coding agents. A planner at the root plans the work and reviews the result, heavy splitters break a feature into small testable tasks, and leaves each do one small task. Everything goes through one MCP server, the delegate server, which gives every splitter four tools: `delegate`, `delegate_many`, `integrate` and `status`.
+A delegation tree for coding agents. A planner at the root plans the work and reviews the result, heavy splitters break a feature into small testable tasks, and leaves each do one small task. Everything goes through one MCP server, the delegate server, which gives every splitter five tools: `delegate`, `delegate_many`, `answer`, `integrate` and `status`.
 
 This file has two parts: how to use the tree, and how to work on this repo.
 
@@ -33,17 +33,19 @@ The result has `node_id`, `status`, `branch`, `summary`, `question`, `decisions`
 
 - `passed`: the test command passed.
 - `failed`: it still failed after the leaf's retries.
-- `needs_decision`: the child stopped to ask you something, and `question` says what. A child asks by ending its final message with a `## Decision needed` section. It isn't retried. Decide, write the answer into the contract and delegate again, or ask your own parent. Its work can still be merged.
+- `needs_decision`: the child stopped to ask you something, and `question` says what. A child asks by ending its final message with a `## Decision needed` section. It isn't retried. Reply with `answer`, or ask your own parent. Its work can still be merged.
 
-`decisions` lists the low-risk decisions a splitter child made itself, from a `## Decisions made` section in its final message. Review them before you merge: if you disagree, don't merge, and delegate again with your choice in the contract. Leaves may not make decisions: a leaf that lists any comes back `needs_decision`, and its parent merges its work only if it agrees with them.
+`decisions` lists the low-risk decisions a splitter child made itself, from a `## Decisions made` section in its final message. Review them before you merge: if you disagree, don't merge, and delegate again with your choice in the contract. Leaves may not make decisions: a leaf that lists any comes back `needs_decision`, and its parent merges its work only if it agrees with them, or `answer`s it with its own choices.
 - `refused`: a leaf task broke a size rule, and nothing ran. Leaf tasks need `files` (at most `leaf_max_files`), a `test_cmd`, and a task plus contract within `leaf_max_task_words`.
 - `over_budget`: you asked for more than you have left.
+
+**`answer`** replies to a child that came back `needs_decision`. It takes the child's `node_id`, the `answer` and a further `budget_usd`. The child carries on in its own agent session and worktree, with what it knew and did, which is cheaper than delegating the task again. The result is like `delegate`'s and may be `needs_decision` again. Each answer is kept with the question it answers, shown by `status` and `agents decisions`, and given to any later attempt that starts afresh.
 
 **`delegate_many`** takes a list of children, each with the same arguments as `delegate`, starts them all at once and returns their results in order when the last is done. Use it for independent pieces: separate `delegate` calls only overlap if the agent CLI sends tool calls together, which it may not.
 
 **`integrate`** merges the children you name into your branch, one at a time with a merge commit, then runs a test command in your worktree. Each merge commit's message lists the decisions that child made, so reverting the commit undoes them. It's a separate tool on purpose: review a child's result before you merge it. If a merge conflicts, it stops, leaves that child unmerged and your worktree as it was, and returns the conflicting files to you. Delegate that task again (the new child starts from your updated branch) or make the change yourself. With an empty list of nodes it only runs the test command.
 
-**`status`** shows the run's tree so far: each node's status, cost and merge state, the decisions it recorded and any question it asked, your branch and worktree, and the budget you have left.
+**`status`** shows the run's tree so far: each node's status, cost and merge state, the decisions it recorded, any question it asked and the answers it got, your branch and worktree, and the budget you have left.
 
 ### Splitting rules
 
@@ -58,8 +60,8 @@ The result has `node_id`, `status`, `branch`, `summary`, `question`, `decisions`
 - Write leaf tasks within the limits, which each splitter's prompt states; a refusal costs a turn.
 - Tag every task's `kind`.
 - A splitter that does a piece of work itself gives a one-line reason in its summary.
-- Decisions go up the tree, as a record or as a question. A low-risk decision (undoing it means reverting one child's work and nothing else, and no other task is written against it) is made by the splitter that meets it and listed under `## Decisions made`, so the run doesn't stall. Leaves never decide: they ask about every open choice, low-risk ones included, so a splitter settles edge cases, error messages, defaults and names in the contract before delegating. A decision that isn't low-risk (it changes a contract, a data format or anything stored, adds a dependency, changes behaviour that existing code or users rely on, touches security, or settles contradicting instructions) is a question for the parent under `## Decision needed`. The parent decides it if it's within the parent's own task, and otherwise asks its own parent. Each splitter passes up the decisions made below it that it kept. Nothing goes round in circles: a splitter only answers a question it is sure of, never answers the same question twice, and never lets children settle a choice between themselves. Anything it is unsure of goes up. After `max_questions` questions from its children, the server refuses its further `delegate` calls, so it has to pass what is open up. The planner is exempt, because its questions go to the user.
-- The planner puts the task's open design questions that aren't low-risk to the user before delegating, with the option it would pick for each, and writes the answers into the contract. It lists the low-risk ones it decided in the same message, so the user can overrule them. Questions that come up from below and that nothing settles go to the user too. The planner scrutinises every decision its delegates made, against the task, the contract, the diff and the user's answers, and `status` lists them all for it. It keeps a decision, overrules it, or, when it is unsure, brings it to the user. Its final summary lists every decision made in the tree and what happened to each. When the planner runs with nobody watching (`agents bench`), it decides them itself and lists them in its summary. When everything is merged, it delegates one `review` child to check the branch against the task's numbered requirements, fixes what it finds, and lists the choices the work made in its summary.
+- Decisions go up the tree, as a record or as a question. A low-risk decision (undoing it means reverting one child's work and nothing else, and no other task is written against it) is made by the splitter that meets it and listed under `## Decisions made`, so the run doesn't stall. Leaves never decide: they ask about every open choice, low-risk ones included, so a splitter settles edge cases, error messages, defaults and names in the contract before delegating. A decision that isn't low-risk (it changes a contract, a data format or anything stored, adds a dependency, changes behaviour that existing code or users rely on, touches security, or settles contradicting instructions) is a question for the parent under `## Decision needed`. The parent decides it if it's within the parent's own task, and otherwise asks its own parent. Each splitter passes up the decisions made below it that it kept. Nothing goes round in circles: a splitter only answers a question it is sure of, never answers the same question twice, and never lets children settle a choice between themselves. Anything it is unsure of goes up. After `max_question_rounds` of its `delegate`, `delegate_many` and `answer` calls have brought back questions (children asking in the same call count once), the server refuses its further `delegate` and `answer` calls, so it has to pass what is open up. The planner is exempt, because its questions go to the user.
+- The planner puts the task's open design questions that aren't low-risk to the user before delegating, with the option it would pick for each, and writes the answers into the contract. It lists the low-risk ones it decided in the same message, so the user can overrule them. Questions that come up from below and that nothing settles go to the user too. The planner scrutinises every decision its delegates made, against the task, the contract, the diff and the user's answers, and `status` lists them all for it. It keeps a decision, overrules it, or, when it is unsure, brings it to the user. Its final summary lists every decision made in the tree and what happened to each. When the planner runs with nobody watching (`agents bench`), it decides them itself and lists them in its summary. When everything is merged, it delegates one `review` child to check the branch against the task's numbered requirements and to find choices in the diff that no node recorded as a decision. It scrutinises those like the rest, fixes what it finds, and lists every decision in its summary, marking the unrecorded ones.
 
 Good leaf tasks:
 
@@ -86,7 +88,7 @@ Keep these true:
 - **Plain over clever.** The owner reads all of it.
 - **Everything pinned.** Tools in `mise.toml` and Python packages in `pyproject.toml` are at exact versions, locked with checksums in `mise.lock` and `uv.lock`. After changing a version, run `uv run python scripts/lock.py`.
 - **The repo is public.** No secrets, hostnames or personal paths. Machine-specific values come from environment variables or a config file outside the repo.
-- **Tests use the fake harness.** `src/agents/harness/fake_agent.py` stands in for a model and makes scripted edits, so tests cost nothing. The one test with real models is opt-in: `uv run pytest -m live -s`.
+- **Tests use the fake harness.** `src/agents/harness/fake_agent.py` stands in for a model and makes scripted edits, so tests cost nothing. `tests/test_example.py` plays a whole run on the orders example with it. The tests with real models are opt-in: `uv run pytest -m live -s`.
 - **Never touch the user's checkout, never push.** All work happens in worktrees under the state directory.
 
 Where things are:
@@ -95,7 +97,7 @@ Where things are:
 | --- | --- |
 | `roles.toml` | tiers, the leaf pool and the limits |
 | `src/agents/config.py` | loads and validates `roles.toml` |
-| `src/agents/server.py` | the MCP server: describes the four tools |
+| `src/agents/server.py` | the MCP server: describes the five tools |
 | `src/agents/engine.py` | what the tools do: run a child, retry, merge, report |
 | `src/agents/tree.py` | run state in SQLite: nodes and budgets |
 | `src/agents/worktrees.py` | every git command: worktrees, branches, merges |
@@ -105,4 +107,6 @@ Where things are:
 | `src/agents/log.py` | the JSONL log and `agents report` |
 | `src/agents/prompts/` | the splitter and leaf system prompts |
 | `src/agents/bench.py` | `agents bench`: the tree against single-model sessions on one task |
-| `src/agents/cli.py` | `agents run`, `status`, `report`, `cleanup`, `bench`, `install`, `serve` |
+| `src/agents/cli.py` | `agents run`, `status`, `decisions`, `report`, `cleanup`, `bench`, `example`, `install`, `serve` |
+| `src/agents/example.py` | `agents example`: makes a repo from `examples/` to try the tree on |
+| `examples/orders/` | a small repo with an open-ended task (`repo/`) and hidden acceptance tests (`accept/`) |

@@ -60,7 +60,7 @@ def test_tools_work_over_stdio_and_run_in_parallel(repo: Path, leaf_settings: Co
 
     tools, children, merged, status = asyncio.run(scenario())
 
-    assert sorted(tools) == ["delegate", "delegate_many", "integrate", "status"]
+    assert sorted(tools) == ["answer", "delegate", "delegate_many", "integrate", "status"]
     assert [child["status"] for child in children] == ["passed", "passed"]
     assert merged["status"] == "passed"
     assert status["you"]["node_id"] == "root"
@@ -127,3 +127,34 @@ def test_delegate_many_over_stdio(repo: Path, leaf_settings: Config) -> None:
     assert first.finished_at is not None and second.finished_at is not None
     assert first.started_at < second.finished_at
     assert second.started_at < first.finished_at
+
+
+def test_answer_over_stdio(repo: Path, leaf_settings: Config) -> None:
+    root = engine.start_run(repo, leaf_settings)
+    context = engine.context_env(
+        leaf_settings,
+        run_id=root.run_id,
+        node_id=root.node_id,
+        depth=root.depth,
+        budget_usd=10.0,
+        worktree=root.worktree,
+    )
+    asking = fake(write={"a.txt": "half\n"}, result="## Decision needed\n\nWhich?")
+    reply = "This one.\n" + fake(write={"a.txt": "done\n"})
+
+    async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
+        async with Client(server_parameters(repo, context)) as client:
+            arguments = leaf_call("a.txt", task=asking, test_cmd="grep done a.txt")
+            asked = await call(client, "delegate", arguments)
+            answered = await call(
+                client,
+                "answer",
+                {"node_id": asked["node_id"], "answer": reply, "budget_usd": 1.0},
+            )
+            return asked, answered
+
+    asked, answered = asyncio.run(scenario())
+
+    assert asked["status"] == "needs_decision"
+    assert answered["status"] == "passed"
+    assert answered["node_id"] == asked["node_id"]

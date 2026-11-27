@@ -5,16 +5,18 @@ It costs money, so it never runs by default:
     uv run pytest -m live -s
 
 It uses whatever roles.toml is in effect, so $AGENTS_CONFIG can point it at cheaper models.
+To run only the orders example: `uv run pytest -m live -s -k orders`.
 The real planner is interactive; here the planner tier is run headless, like any splitter.
 """
 
 import asyncio
+import shutil
 from pathlib import Path
 
 import pytest
 from helpers import checkout_state, git
 
-from agents import cli, config, engine, log, paths, tree
+from agents import cli, config, engine, example, log, paths, tree
 
 TEST_CMD = "python3 -m unittest"
 
@@ -73,4 +75,40 @@ def test_real_models_take_a_feature_down_the_tree_and_back(tmp_path: Path) -> No
     assert sum(1 for node in leaves if node.merge_state == tree.MERGED) >= 2
     assert any(node.status == tree.PASSED for node in leaves)
 
+    assert checkout_state(repo) == before
+
+
+ORDERS_TASK_NOTE = """
+
+Use the delegation tree for this: hand the work to children rather than doing it yourself.
+Nobody is watching this run, so settle open questions yourself as your instructions say, and
+end with every decision made in the tree.
+"""
+
+
+@pytest.mark.live
+def test_real_models_record_decisions_on_the_orders_example(tmp_path: Path) -> None:
+    """The orders task leaves choices open. A real run should finish it, and the choices
+    should show up as recorded decisions or questions, not be made silently."""
+    repo = example.make_repo(tmp_path / "orders")
+    before = checkout_state(repo)
+    settings = config.load()
+    root = engine.start_run(repo, settings)
+    task = (repo / "TASK.md").read_text() + ORDERS_TASK_NOTE
+
+    result = asyncio.run(
+        engine.run_root_headless(root, settings, task=task, test_cmd=example.TEST_CMD)
+    )
+
+    print()
+    print(cli.format_status(engine.status(root.run_id)))
+    print()
+    print(cli.format_decisions(engine.decisions(root.run_id)))
+    print(f"\nPlanner's own cost: ${result.cost_usd}\n\n{result.summary}\n")
+
+    assert result.ok, result.summary
+    shutil.copytree(example.example_dir() / "accept", root.worktree, dirs_exist_ok=True)
+    exit_code, output = engine.run_test(example.ACCEPT_CMD, root.worktree, 600)
+    assert exit_code == 0, output
+    assert engine.decisions(root.run_id)["nodes"], "no node recorded a decision or a question"
     assert checkout_state(repo) == before

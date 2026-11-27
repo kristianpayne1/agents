@@ -1,0 +1,7 @@
+order_id,sku,quantity,unit_price
+A1,widget,3,2.50
+A2,gadget,1,10.00
+
+A3,widget,2,2.50
+A4,gizmo,4,1.25
+A5,gadget,1,10.00

@@ -125,14 +125,14 @@ def test_leaf_task_checks(settings: Config) -> None:
     assert "Split this further" in check(files=[])
 
 
-def test_max_questions_must_be_at_least_one(make_settings: Callable[..., Config]) -> None:
-    with pytest.raises(config.ConfigError, match="max_questions must be at least 1"):
-        make_settings(max_questions=0)
+def test_max_question_rounds_must_be_at_least_one(make_settings: Callable[..., Config]) -> None:
+    with pytest.raises(config.ConfigError, match="max_question_rounds must be at least 1"):
+        make_settings(max_question_rounds=0)
 
 
-def test_max_questions_defaults_when_left_out(tmp_path: Path) -> None:
-    roles = config.REPO_CONFIG.read_text().replace("max_questions = 3", "")
+def test_max_question_rounds_defaults_when_left_out(tmp_path: Path) -> None:
+    roles = config.REPO_CONFIG.read_text().replace("max_question_rounds = 3", "")
     path = tmp_path / "older-roles.toml"
     path.write_text(roles)
 
-    assert config.load(path).limits.max_questions == 3
+    assert config.load(path).limits.max_question_rounds == 3

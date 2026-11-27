@@ -491,9 +491,9 @@ def test_child_splitter_prompt_says_to_ask_its_parent(settings: Config) -> None:
     assert "ask your parent" in child
     assert engine.DECISION_HEADING in child
     assert engine.DECISIONS_MADE_HEADING in child
-    assert "come back `needs_decision` 3 times" not in child  # no limits given
+    assert "Once 3 of your" not in child  # no limits given
     with_limits = engine.node_prompt(**arguments, limits=settings.limits)
-    assert "come back `needs_decision` 3 times" in with_limits
+    assert "Once 3 of your `delegate`, `delegate_many` or `answer` calls" in with_limits
     assert "ask your parent" not in root
     assert "Decide open questions yourself" in root
 
@@ -552,6 +552,14 @@ def test_node_can_record_decisions_and_ask_in_one_message(
     assert "JSON" not in result["decisions"]
 
 
+def _heavy_caller(root: engine.Caller, settings: Config) -> engine.Caller:
+    """A heavy splitter under the root, to make calls as, the way its own server would."""
+    heavy = delegate(root, settings, task=fake(), kind="feature", budget_usd=5.0)
+    node = tree.get_node(paths.run_db(root.run_id), heavy["node_id"])
+    assert node is not None
+    return engine.Caller(root.run_id, node.node_id, node.depth, Path(node.worktree))
+
+
 def _asking_leaf(path: str) -> dict[str, object]:
     return leaf_call(path, task=fake(write={path: "x\n"}, result="## Decision needed\n\nWhich?"))
 
@@ -560,19 +568,32 @@ def test_splitter_whose_children_keep_asking_must_ask_its_parent(
     repo: Path, settings: Config
 ) -> None:
     root = engine.start_run(repo, settings)
-    heavy = delegate(root, settings, task=fake(), kind="feature", budget_usd=5.0)
-    node = tree.get_node(paths.run_db(root.run_id), heavy["node_id"])
-    assert node is not None
-    # Speak for the heavy splitter, as its own delegate server would.
-    splitter = engine.Caller(root.run_id, node.node_id, node.depth, Path(node.worktree))
+    splitter = _heavy_caller(root, settings)
 
     asked = [delegate(splitter, settings, **_asking_leaf(f"q{n}.txt")) for n in range(3)]
     fourth = delegate(splitter, settings, **leaf_call("done.txt"))
 
     assert [result["status"] for result in asked] == ["needs_decision"] * 3
     assert fourth["status"] == "refused"
-    assert "come back needs_decision 3 times" in fourth["summary"]
+    assert "3 of your calls have brought back questions" in fourth["summary"]
     assert "ask your parent" in fourth["summary"]
+
+
+def test_children_asking_together_count_as_one_round(repo: Path, settings: Config) -> None:
+    root = engine.start_run(repo, settings)
+    splitter = _heavy_caller(root, settings)
+
+    # Four leaves at once all ask. One call, so one round, and the splitter can carry on.
+    asked = asyncio.run(
+        engine.delegate_many(splitter, settings, [_asking_leaf(f"q{n}.txt") for n in range(4)])
+    )
+    after = delegate(splitter, settings, **leaf_call("done.txt"))
+
+    assert [result["status"] for result in asked] == ["needs_decision"] * 4
+    assert after["status"] == "passed"
+    node = tree.get_node(paths.run_db(root.run_id), splitter.node_id)
+    assert node is not None
+    assert node.question_rounds == 1
 
 
 def test_the_planner_is_never_stopped_from_delegating_by_questions(

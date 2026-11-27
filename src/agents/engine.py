@@ -1,4 +1,4 @@
-"""What `delegate`, `integrate` and `status` actually do.
+"""What `delegate`, `delegate_many`, `answer`, `integrate` and `status` actually do.
 
 server.py only exposes these functions as MCP tools. Keeping the work here means the tests
 (and the fake agent) can call it directly, with no MCP client in between.
@@ -70,6 +70,7 @@ class Outcome:
     summary: str
     question: str = ""
     decisions: str = ""
+    session_id: str = ""
     cost_usd: float = 0.0
     cost_known: bool = True
     attempts: int = 0
@@ -209,7 +210,7 @@ async def run_root_headless(
     )
 
 
-# --- delegate ----------------------------------------------------------------------------
+# --- delegate and answer -----------------------------------------------------------------
 
 
 async def delegate(
@@ -224,6 +225,151 @@ async def delegate(
     kind: str = "other",
 ) -> dict[str, Any]:
     """Start a child node, wait for it, and return its result."""
+    result = await _delegate_one(
+        caller,
+        settings,
+        task=task,
+        budget_usd=budget_usd,
+        contract=contract,
+        files=files,
+        test_cmd=test_cmd,
+        kind=kind,
+    )
+    _count_question_round(caller, [result])
+    return result
+
+
+async def delegate_many(
+    caller: Caller, settings: Config, children: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Start several children at once, wait for all of them, and return their results in order.
+
+    Parallel `delegate` calls only overlap if the agent CLI sends MCP tool calls together,
+    which it may not; this runs them together on the server whatever the client does.
+    """
+    results = list(
+        await asyncio.gather(*(_delegate_one(caller, settings, **child) for child in children))
+    )
+    # However many of the children ask, one call is one round of questions.
+    _count_question_round(caller, results)
+    return results
+
+
+async def answer(
+    caller: Caller, settings: Config, *, node_id: str, answer: str, budget_usd: float
+) -> dict[str, Any]:
+    """Resume a child that asked a question, with the answer, and return its new result.
+
+    The child carries on in the same agent session and the same worktree, so it keeps what
+    it knew and what it did.
+    """
+    started = time.time()
+    db = paths.run_db(caller.run_id)
+    node = tree.get_node(db, node_id)
+    if node is None or node.parent_id != caller.node_id:
+        return _refused(node_id, f"Refused: '{node_id}' is not one of your children.")
+    refusal = _answer_refusal(caller, settings, answer=answer, budget_usd=budget_usd)
+    if refusal is None:
+        # Kept with the question it answers, since the node's next summary replaces this one.
+        question = decision_request(node.summary) or "(no question recorded)"
+        exchange = f"Q: {question}\nA: {answer.strip()}"
+        error = tree.reopen_node(db, node_id, budget_usd=budget_usd, answer=exchange)
+        refusal = f"Refused: {error}" if error else None
+    if refusal is not None:
+        return _refused(node_id, refusal)
+
+    node = tree.get_node(db, node_id)
+    assert node is not None
+    before = Outcome(status=node.status, summary="", cost_usd=node.cost_usd, attempts=node.attempts)
+    result = await _run_and_finish(
+        caller,
+        settings,
+        node,
+        _agent_for(settings, node),
+        started=started,
+        resume=(node.session_id, answer),
+        before=before,
+    )
+    _count_question_round(caller, [result])
+    return result
+
+
+def _count_question_round(caller: Caller, results: list[dict[str, Any]]) -> None:
+    if any(result["status"] == tree.NEEDS_DECISION for result in results):
+        tree.add_question_round(paths.run_db(caller.run_id), caller.node_id)
+
+
+def _question_rounds_refusal(caller: Caller, settings: Config, action: str) -> str | None:
+    """Why the caller may not delegate or answer any more, or None if it may.
+
+    Below the root, a splitter whose children keep coming back with questions is going round
+    in circles, so after `max_question_rounds` it has to pass what is open up to its parent.
+    The root is exempt: its questions go to the user.
+    """
+    if caller.depth == 0:
+        return None
+    node = tree.get_node(paths.run_db(caller.run_id), caller.node_id)
+    rounds = node.question_rounds if node else 0
+    limit = settings.limits.max_question_rounds
+    if rounds < limit:
+        return None
+    return (
+        f"Refused: {rounds} of your calls have brought back questions, the limit is {limit}, "
+        f"so you can't {action} any more. Merge what is right whatever the answers, then "
+        "finish and ask your parent about everything still open, under a "
+        f"`{DECISION_HEADING}` heading."
+    )
+
+
+def _answer_refusal(
+    caller: Caller, settings: Config, *, answer: str, budget_usd: float
+) -> str | None:
+    if not answer.strip():
+        return "Refused: `answer` is empty."
+    if budget_usd <= 0:
+        return "Refused: `budget_usd` must be more than 0."
+    return _question_rounds_refusal(caller, settings, "answer")
+
+
+def _refused(node_id: str, summary: str) -> dict[str, Any]:
+    """The result of an `answer` call that was refused before anything ran."""
+    return {
+        "node_id": node_id,
+        "status": tree.REFUSED,
+        "branch": "",
+        "summary": summary,
+        "question": "",
+        "decisions": "",
+        "diff_stat": "",
+        "test_output": "",
+        "cost_usd": 0.0,
+        "attempts": 0,
+    }
+
+
+def _agent_for(settings: Config, node: tree.Node) -> PoolMember:
+    """The harness and model a node ran with, so it is resumed with the same ones."""
+    tier = settings.tier_for_depth(node.depth)
+    if tier.can_split:
+        return tier.splitter_agent()
+    for member in tier.pool:
+        if member.harness == node.harness and member.model == node.model:
+            return member
+    return PoolMember(node.tier, node.harness, node.model)
+
+
+async def _delegate_one(
+    caller: Caller,
+    settings: Config,
+    *,
+    task: str,
+    budget_usd: float,
+    contract: str = "",
+    files: list[str] | None = None,
+    test_cmd: str | None = None,
+    kind: str = "other",
+) -> dict[str, Any]:
+    """Start one child node, wait for it, and return its result."""
     started = time.time()
     db = paths.run_db(caller.run_id)
     files = list(files or [])
@@ -263,38 +409,84 @@ async def delegate(
         task=task,
         budget_usd=budget_usd,
         refusal=refusal,
+        contract=contract,
+        files=files,
+        test_cmd=test_cmd or "",
+    )
+    if node.status != tree.RUNNING:
+        outcome = Outcome(status=node.status, summary=node.summary)
+        _log_node(caller, node, outcome, started=started)
+        return _result(node, outcome, diff_stat="")
+
+    try:
+        node = _create_workspace(caller, node)
+    except Exception as error:
+        outcome = Outcome(status=tree.FAILED, summary=f"Internal error: {error}")
+        node = _finish(caller.run_id, node, outcome)
+        _log_node(caller, node, outcome, started=started)
+        return _result(node, outcome, diff_stat="")
+    return await _run_and_finish(caller, settings, node, agent, started=started)
+
+
+async def _run_and_finish(
+    caller: Caller,
+    settings: Config,
+    node: tree.Node,
+    agent: PoolMember,
+    *,
+    started: float,
+    resume: tuple[str, str] | None = None,
+    before: Outcome | None = None,
+) -> dict[str, Any]:
+    """Run a started node to the end, record and log how it ended, and return its result."""
+    before = before or Outcome(status=tree.RUNNING, summary="")
+    diff_stat = ""
+    try:
+        outcome = await _run_node(
+            settings, caller.run_id, node, agent, resume=resume, before=before
+        )
+        diff_stat = worktrees.diff_stat(Path(node.worktree), node.base_commit)
+    except Exception as error:
+        # Whatever goes wrong with one child, the parent gets an answer, not a crash.
+        outcome = Outcome(
+            status=tree.FAILED,
+            summary=f"Internal error: {error}",
+            cost_usd=before.cost_usd,
+            attempts=before.attempts,
+        )
+    node = _finish(caller.run_id, node, outcome)
+    _log_node(caller, node, outcome, started=started, answered=resume is not None, before=before)
+    return _result(node, outcome, diff_stat=diff_stat)
+
+
+def _finish(run_id: str, node: tree.Node, outcome: Outcome) -> tree.Node:
+    return tree.finish_node(
+        paths.run_db(run_id),
+        node.node_id,
+        status=outcome.status,
+        cost_usd=outcome.cost_usd,
+        attempts=outcome.attempts,
+        summary=outcome.summary,
+        test_exit_code=outcome.test_exit_code,
+        session_id=outcome.session_id,
     )
 
-    outcome = Outcome(status=node.status, summary=node.summary)
-    diff_stat = ""
-    if node.status == tree.RUNNING:
-        try:
-            node = _create_workspace(caller, node)
-            outcome = await _run_node(
-                settings,
-                caller.run_id,
-                node,
-                agent,
-                is_leaf=is_leaf,
-                task=task,
-                contract=contract,
-                files=files,
-                test_cmd=test_cmd,
-            )
-            diff_stat = worktrees.diff_stat(Path(node.worktree), node.base_commit)
-        except Exception as error:
-            # Whatever goes wrong with one child, the parent gets an answer, not a crash.
-            outcome = Outcome(status=tree.FAILED, summary=f"Internal error: {error}")
-        node = tree.finish_node(
-            db,
-            node.node_id,
-            status=outcome.status,
-            cost_usd=outcome.cost_usd,
-            attempts=outcome.attempts,
-            summary=outcome.summary,
-            test_exit_code=outcome.test_exit_code,
-        )
 
+def _log_node(
+    caller: Caller,
+    node: tree.Node,
+    outcome: Outcome,
+    *,
+    started: float,
+    answered: bool = False,
+    before: Outcome | None = None,
+) -> None:
+    """Log one run of a node.
+
+    A node resumed with an answer logs each run on its own line, with what that run cost and
+    how many attempts it took, so that costs aren't counted twice.
+    """
+    before = before or Outcome(status=tree.RUNNING, summary="")
     log.write(
         {
             "event": log.NODE,
@@ -306,19 +498,23 @@ async def delegate(
             "tier": node.tier,
             "model": node.model,
             "kind": node.kind,
-            "file_count": len(files),
-            "task_words": checks.word_count(task, contract),
-            "attempts": outcome.attempts,
+            "file_count": len(node.file_list),
+            "task_words": checks.word_count(node.task, node.contract),
+            "attempts": outcome.attempts - before.attempts,
             "status": outcome.status,
-            "cost_usd": outcome.cost_usd,
+            "cost_usd": round(outcome.cost_usd - before.cost_usd, 6),
             "cost_known": outcome.cost_known,
             "tokens": outcome.tokens,
             "permission_denials": outcome.permission_denials,
             "duration_s": round(time.time() - started, 1),
             "test_exit_code": outcome.test_exit_code,
             "decisions_made": _count_items(outcome.decisions),
+            "answered": answered,
         }
     )
+
+
+def _result(node: tree.Node, outcome: Outcome, *, diff_stat: str) -> dict[str, Any]:
     return {
         "node_id": node.node_id,
         "status": outcome.status,
@@ -331,17 +527,6 @@ async def delegate(
         "cost_usd": outcome.cost_usd,
         "attempts": outcome.attempts,
     }
-
-
-async def delegate_many(
-    caller: Caller, settings: Config, children: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Start several children at once, wait for all of them, and return their results in order.
-
-    Parallel `delegate` calls only overlap if the agent CLI sends MCP tool calls together,
-    which it may not; this runs them together on the server whatever the client does.
-    """
-    return list(await asyncio.gather(*(delegate(caller, settings, **child) for child in children)))
 
 
 def _refusal(
@@ -365,17 +550,9 @@ def _refusal(
         return f"Refused: unknown kind '{kind}'. Use one of: {', '.join(KINDS)}."
     if budget_usd <= 0:
         return "Refused: `budget_usd` must be more than 0."
-    if caller.depth > 0:
-        # Below the root, a splitter whose children keep asking is going round in circles.
-        db = paths.run_db(caller.run_id)
-        asked = tree.count_children(db, caller.node_id, tree.NEEDS_DECISION)
-        if asked >= settings.limits.max_questions:
-            return (
-                f"Refused: your children have come back needs_decision {asked} times, the "
-                f"limit is {settings.limits.max_questions}. Don't delegate again. Merge what "
-                "is right whatever the answers, then finish and ask your parent about "
-                f"everything still open, under a `{DECISION_HEADING}` heading."
-            )
+    too_many_questions = _question_rounds_refusal(caller, settings, "delegate")
+    if too_many_questions is not None:
+        return too_many_questions
     if is_leaf:
         return checks.check_leaf_task(
             task=task, contract=contract, files=files, test_cmd=test_cmd, limits=settings.limits
@@ -407,49 +584,80 @@ def _create_workspace(caller: Caller, node: tree.Node) -> tree.Node:
     return updated
 
 
+def answer_prompt(answer: str) -> str:
+    """What a resumed node is told: its parent's answer, and to carry on."""
+    return (
+        "## Answer from your parent\n\n"
+        f"{answer.strip()}\n\n"
+        "Carry on with your task from where you stopped, using this answer. Your earlier work "
+        "is still in the worktree. Run the test command, commit, and end your final message "
+        "as your instructions describe: list any decisions you made, and ask again under "
+        f"`{DECISION_HEADING}` only if something is still open.\n"
+    )
+
+
 async def _run_node(
     settings: Config,
     run_id: str,
     node: tree.Node,
     agent: PoolMember,
     *,
-    is_leaf: bool,
-    task: str,
-    contract: str,
-    files: list[str],
-    test_cmd: str | None,
+    resume: tuple[str, str] | None = None,
+    before: Outcome | None = None,
 ) -> Outcome:
-    """Run the child's agent, then its test command. A leaf is retried if the test fails."""
+    """Run the node's agent, then its test command. A leaf is retried if the test fails.
+
+    With `resume` (a session id and an answer), the first attempt carries on that session
+    with the answer instead of starting a new one. `before` is how the node stood before
+    this run, so that costs and attempts add up across runs.
+    """
     limits = settings.limits
+    db = paths.run_db(run_id)
     harness = get_harness(agent.harness)
     worktree = Path(node.worktree)
+    is_leaf = not settings.tier_for_depth(node.depth).can_split
     role = harness_base.LEAF if is_leaf else harness_base.SPLITTER
     max_attempts = limits.leaf_max_attempts if is_leaf else 1
+    files = node.file_list
+    test_cmd = node.test_cmd or None
+    before = before or Outcome(status=tree.RUNNING, summary="")
 
-    outcome = Outcome(status=tree.FAILED, summary="")
-    for attempt in range(1, max_attempts + 1):
-        budget_left = node.budget_usd - outcome.cost_usd
+    outcome = Outcome(
+        status=tree.FAILED, summary="", cost_usd=before.cost_usd, attempts=before.attempts
+    )
+    for number in range(max_attempts):
+        # What is left: the node's budget, less what its children hold and its own spending,
+        # part of which (this run's) isn't recorded yet.
+        spent_this_run = outcome.cost_usd - before.cost_usd
+        budget_left = tree.remaining_usd(db, node.node_id) - spent_this_run
         if budget_left <= 0:
             outcome.summary += "\nNot retried: this task's budget is used up."
             break
-        outcome.attempts = attempt
+        outcome.attempts = before.attempts + number + 1
+        resume_session_id = resume[0] if resume is not None and number == 0 else None
 
+        if resume is not None and number == 0:
+            prompt = answer_prompt(resume[1])
+        else:
+            # A fresh session: the whole task, with any answers given so far.
+            prompt = node_prompt(
+                is_leaf=is_leaf,
+                task=node.task,
+                contract=node.contract,
+                files=files,
+                test_cmd=test_cmd,
+                budget_usd=budget_left,
+                children_are_leaves=children_are_leaves(settings, node.depth),
+                failed_test_output=outcome.test_output if number > 0 else "",
+                limits=settings.limits,
+                answers=node.answers,
+            )
         request = harness_base.NodeRequest(
             role=role,
             model=agent.model,
             effort=agent.effort,
             system_prompt=prompts.load(role),
-            prompt=node_prompt(
-                is_leaf=is_leaf,
-                task=task,
-                contract=contract,
-                files=files,
-                test_cmd=test_cmd,
-                budget_usd=budget_left,
-                children_are_leaves=children_are_leaves(settings, node.depth),
-                failed_test_output=outcome.test_output if attempt > 1 else "",
-                limits=settings.limits,
-            ),
+            prompt=prompt,
             worktree=worktree,
             budget_usd=budget_left,
             env=context_env(
@@ -459,14 +667,16 @@ async def _run_node(
                 depth=node.depth,
                 budget_usd=budget_left,
                 worktree=worktree,
-                attempt=attempt,
+                attempt=outcome.attempts,
             ),
             delegate_server=None if is_leaf else SERVER_COMMAND,
             allowed_commands=[test_cmd] if test_cmd else [],
+            resume_session_id=resume_session_id,
         )
         result = await harness_base.run(harness, request, limits.node_timeout_s)
 
         outcome.summary = result.summary
+        outcome.session_id = result.session_id
         outcome.decisions = decisions_made(result.summary)
         if result.cost_usd is None:
             outcome.cost_known = False
@@ -563,6 +773,7 @@ def node_prompt(
     failed_test_output: str,
     limits: Limits | None = None,
     has_parent: bool = True,
+    answers: str = "",
 ) -> str:
     sections = [f"## Task\n\n{task.strip()}"]
     if contract.strip():
@@ -590,9 +801,9 @@ def node_prompt(
         children = _children_note(children_are_leaves, limits)
         if has_parent and limits is not None:
             children += (
-                f" If your children come back `needs_decision` {limits.max_questions} times "
-                "in all, you can't delegate any more: merge what is right, then ask your "
-                "parent about everything still open."
+                f" Once {limits.max_question_rounds} of your `delegate`, `delegate_many` or "
+                "`answer` calls have brought back questions, you can't delegate or answer any "
+                "more: merge what is right, then ask your parent about everything still open."
             )
         sections.append("## Your children\n\n" + children)
         if has_parent:
@@ -613,6 +824,12 @@ def node_prompt(
             "`commit`, plus your test command if you were given one. Other shell commands "
             "are denied. To run any other test command, call `integrate`: with an empty list "
             "of nodes it only runs the command."
+        )
+    if answers.strip():
+        sections.append(
+            "## Answers from your parent\n\n"
+            "You asked about this task before. These are your questions and your parent's "
+            f"answers, oldest first. Keep to them.\n\n{answers.strip()}"
         )
     if failed_test_output:
         sections.append(
@@ -813,10 +1030,45 @@ def status(run_id: str, node_id: str = tree.ROOT_ID) -> dict[str, Any]:
                 # Every decision recorded in the tree, so the planner can check them all.
                 "decisions": decisions_made(node.summary),
                 "question": decision_request(node.summary) or "",
+                "answers": node.answers,
             }
             for node in nodes
         ],
     }
+
+
+def decisions(run_id: str) -> dict[str, Any]:
+    """Every decision, question and answer recorded in a run, for the user to review.
+
+    Each node that made a decision, asked a question or was answered is listed, with the
+    merge commit on the root branch that brought its work in, if any: reverting that commit
+    undoes the node's work and the decisions it made.
+    """
+    db = paths.run_db(run_id)
+    run = tree.get_run(db)
+    nodes = tree.all_nodes(db)
+    root = next(node for node in nodes if node.node_id == tree.ROOT_ID)
+    repo = Path(run.repo_path)
+    entries: list[dict[str, Any]] = []
+    for node in nodes:
+        made = decisions_made(node.summary)
+        question = decision_request(node.summary) or ""
+        if not (made or question or node.answers):
+            continue
+        entries.append(
+            {
+                "node_id": node.node_id,
+                "tier": node.tier,
+                "status": node.status,
+                "task": _first_line(node.task),
+                "decisions": made,
+                # A question that was answered is history; one still open is waiting.
+                "question": question,
+                "answers": node.answers,
+                "merge_commit": worktrees.find_merge_commit(repo, root.branch, node.node_id),
+            }
+        )
+    return {"run_id": run.run_id, "repo": run.repo_path, "branch": root.branch, "nodes": entries}
 
 
 def _first_line(text: str, limit: int = 100) -> str:

@@ -1,4 +1,4 @@
-"""The `agents` command: run | status | report | cleanup | bench | install | serve."""
+"""The `agents` command: run, status, decisions, report, cleanup, bench, example, install, serve."""
 
 import argparse
 import os
@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from agents import bench, config, engine, log, prompts, server, worktrees
+from agents import bench, config, engine, example, log, prompts, server, worktrees
 from agents.harness import base as harness_base
 from agents.harness import get_harness
 from agents.harness.claude import MCP_SERVER_NAME
@@ -24,6 +24,12 @@ def main() -> int:
     status = commands.add_parser("status", help="show a run's tree (the latest run by default)")
     status.add_argument("run_id", nargs="?")
     status.set_defaults(handler=cmd_status)
+
+    decided = commands.add_parser(
+        "decisions", help="list every decision, question and answer in a run (latest by default)"
+    )
+    decided.add_argument("run_id", nargs="?")
+    decided.set_defaults(handler=cmd_decisions)
 
     report = commands.add_parser("report", help="summarise the log per tier and per kind")
     report.set_defaults(handler=cmd_report)
@@ -52,6 +58,11 @@ def main() -> int:
     compare.add_argument("--runs", type=int, default=3, help="runs per arm (default 3)")
     compare.add_argument("--yes", action="store_true", help="start without asking")
     compare.set_defaults(handler=cmd_bench)
+
+    sample = commands.add_parser("example", help="make a small git repo to try the tree on")
+    sample.add_argument("destination", type=Path, help="a new or empty folder for the repo")
+    sample.add_argument("--name", default=example.DEFAULT_EXAMPLE, help="which example to use")
+    sample.set_defaults(handler=cmd_example)
 
     install = commands.add_parser("install", help="register the delegate server with Claude Code")
     install.add_argument("--scope", default="user", choices=["local", "user", "project"])
@@ -148,6 +159,44 @@ def _sort_key(node_id: str) -> list[int]:
     return [int(part) for part in node_id.split(".")[1:]]
 
 
+def cmd_decisions(args: argparse.Namespace) -> int:
+    run_id = args.run_id or engine.latest_run_id()
+    if run_id is None:
+        print("No runs yet.")
+        return 0
+    print(format_decisions(engine.decisions(run_id)))
+    return 0
+
+
+def format_decisions(found: dict[str, Any]) -> str:
+    """The run's decisions as text: per node, what it decided, asked and was told."""
+    lines = [f"Decisions in run {found['run_id']} ({found['repo']}), root branch {found['branch']}"]
+    if not found["nodes"]:
+        return lines[0] + "\n\nNo node recorded a decision or asked a question."
+    for node in found["nodes"]:
+        lines += ["", f"{node['node_id']}  {node['tier']}, {node['status']}  {node['task']}"]
+        lines += _labelled("decided", node["decisions"])
+        lines += _labelled("asked", node["question"] if node["status"] == "needs_decision" else "")
+        lines += _labelled("answered", node["answers"])
+        if node["merge_commit"]:
+            lines.append(
+                f"  merged in {node['merge_commit']}; to undo it: "
+                f"git revert -m 1 {node['merge_commit']}"
+            )
+        else:
+            lines.append("  not merged into the root branch")
+    return "\n".join(lines)
+
+
+def _labelled(label: str, text: str) -> list[str]:
+    """`text` indented under a label, or nothing if it's empty."""
+    rows = [row for row in text.strip().splitlines() if row.strip()]
+    if not rows:
+        return []
+    first, *rest = rows
+    return [f"  {label + ':':<10}{first}", *(f"  {'':<10}{row}" for row in rest)]
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     print(log.report(log.read()))
     return 0
@@ -191,6 +240,16 @@ def cmd_bench(args: argparse.Namespace) -> int:
     )
     print()
     print(bench.summary(results))
+    return 0
+
+
+def cmd_example(args: argparse.Namespace) -> int:
+    try:
+        destination = example.make_repo(args.destination.expanduser().resolve(), args.name)
+    except FileExistsError as error:
+        print(f"agents: {error}", file=sys.stderr)
+        return 1
+    print(example.next_steps(destination, args.name))
     return 0
 
 

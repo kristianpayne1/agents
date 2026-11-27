@@ -15,12 +15,18 @@ Instructions (all optional):
     result      the final message to print (default "fake agent done"), for example one
                 that asks for a decision
     delegate    a list of `delegate` arguments: act as a splitter and run these children,
-                all at the same time
+                all at the same time, with one `delegate_many` call
+    answers     a list of {"child": index, "answer": text, "budget_usd": dollars}: after the
+                children are done, answer each listed child that came back needs_decision.
+                The child is resumed with the answer, so a FAKE: line in the answer is what
+                the resumed child does.
     integrate   a test command: merge the children that passed, then run it
     attempts    a list of instruction sets, one per attempt; the last is reused if the node
                 is retried more times than the list is long
 
-Like a real headless agent, it prints one JSON object when it's done.
+Like a real headless agent, it prints one JSON object when it's done, with a session id. Run
+with `--resume <session id>`, it carries on that session: it reports the same id, and only
+the new prompt (the answer) gives it instructions.
 """
 
 import asyncio
@@ -28,6 +34,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +44,7 @@ MARKER = "FAKE:"
 
 
 def main() -> int:
+    resumed = sys.argv[sys.argv.index("--resume") + 1] if "--resume" in sys.argv else None
     instructions = _read_instructions(sys.stdin.read())
     if "attempts" in instructions:
         attempt = int(os.environ.get(engine.ENV_ATTEMPT, "1"))
@@ -60,6 +68,8 @@ def main() -> int:
 
     result = {
         "result": instructions.get("result", "fake agent done"),
+        "session_id": resumed or str(uuid.uuid4()),
+        "resumed": resumed is not None,
         "total_cost_usd": instructions.get("cost", 0.01),
         "children": children,
         "integrated": integrated,
@@ -83,10 +93,18 @@ async def _act_as_splitter(
         raise RuntimeError("a fake splitter needs the run context in its environment")
     settings = config.load()
 
-    calls = [
-        engine.delegate(caller, settings, **arguments) for arguments in instructions["delegate"]
-    ]
-    children = list(await asyncio.gather(*calls))
+    children = await engine.delegate_many(caller, settings, instructions["delegate"])
+
+    for reply in instructions.get("answers", []):
+        child = children[reply["child"]]
+        if child["status"] == "needs_decision":
+            children[reply["child"]] = await engine.answer(
+                caller,
+                settings,
+                node_id=child["node_id"],
+                answer=reply["answer"],
+                budget_usd=reply.get("budget_usd", 1.0),
+            )
 
     integrated = None
     if "integrate" in instructions:

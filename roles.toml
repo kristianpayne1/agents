@@ -40,6 +40,6 @@ run_budget_usd = 40.0
 leaf_max_files = 3
 leaf_max_task_words = 300
 leaf_max_attempts = 2
-max_questions = 3         # times a splitter's children may ask before it must ask its parent
+max_question_rounds = 3   # calls of a splitter's that may bring back questions before it must ask its parent
 node_timeout_s = 7200     # one headless agent process
 test_timeout_s = 600      # one run of a test command

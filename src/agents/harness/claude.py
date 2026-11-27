@@ -33,6 +33,9 @@ class ClaudeHarness(Harness):
 
     def build_command(self, request: NodeRequest) -> Command:
         argv = ["claude", "--print", "--output-format", "json", "--model", request.model]
+        if request.resume_session_id:
+            # Carry on the node's earlier session, in the same worktree, with what it knew.
+            argv += ["--resume", request.resume_session_id]
         if request.effort:
             argv += ["--effort", request.effort]
         argv += [
@@ -100,6 +103,7 @@ class ClaudeHarness(Harness):
             cost_usd=self.extract_cost(payload),
             tokens=tokens,
             permission_denials=len(payload.get("permission_denials") or []),
+            session_id=str(payload.get("session_id") or ""),
         )
 
     def extract_cost(self, payload: dict[str, Any]) -> float | None:

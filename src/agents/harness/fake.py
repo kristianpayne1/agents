@@ -15,9 +15,10 @@ class FakeHarness(Harness):
     name = "fake"
 
     def build_command(self, request: NodeRequest) -> Command:
-        return Command(
-            argv=[sys.executable, "-m", "agents.harness.fake_agent"], stdin=request.prompt
-        )
+        argv = [sys.executable, "-m", "agents.harness.fake_agent"]
+        if request.resume_session_id:
+            argv += ["--resume", request.resume_session_id]
+        return Command(argv=argv, stdin=request.prompt)
 
     def build_planner_command(self, request: NodeRequest) -> Command:
         raise NotImplementedError("the fake harness has no interactive planner")
@@ -36,6 +37,7 @@ class FakeHarness(Harness):
             ok=exit_code == 0,
             summary=payload.get("result", ""),
             cost_usd=self.extract_cost(payload),
+            session_id=payload.get("session_id", ""),
         )
 
     def extract_cost(self, payload: dict[str, Any]) -> float | None:
